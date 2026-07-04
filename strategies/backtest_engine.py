@@ -51,23 +51,35 @@ def _perf(returns: pd.Series) -> tuple[float, float, float, pd.Series]:
     sharpe = 0.0
     if pd.notna(std) and std > 0:
         sharpe = float(returns.mean() / std * np.sqrt(TRADING_DAYS))
-    drawdown = float((equity / equity.cummax() - 1.0).min())
+    # the peak includes the starting capital of 1.0, else a window that opens
+    # with a decline understates its drawdown by the first bar's loss
+    peak = equity.cummax().clip(lower=1.0)
+    drawdown = float(min((equity / peak - 1.0).min(), 0.0))
     return total, sharpe, drawdown, equity
 
 
 def _extract_trades(close: pd.Series, pos: pd.Series) -> list[Trade]:
+    """Fills are at the decision bar's close — the bar BEFORE the (already
+    shifted) position series changes — so recorded trades reconcile exactly
+    with the return accounting. At the window's first bar there is no prior
+    bar and the first return is dropped, so that bar is its own fill."""
     trades: list[Trade] = []
     entry_date = None
     entry_price = 0.0
     prev = 0.0
+    prev_date = None
     for date, p in pos.items():
         if p > prev:
-            entry_date = date
-            entry_price = float(close.loc[date])
+            fill = prev_date if prev_date is not None else date
+            entry_date = fill
+            entry_price = float(close.loc[fill])
         elif p < prev and entry_date is not None:
-            trades.append(Trade(entry_date, entry_price, date, float(close.loc[date])))
+            trades.append(
+                Trade(entry_date, entry_price, prev_date, float(close.loc[prev_date]))
+            )
             entry_date = None
         prev = p
+        prev_date = date
     if entry_date is not None:
         trades.append(Trade(entry_date, entry_price, None, None))
     return trades

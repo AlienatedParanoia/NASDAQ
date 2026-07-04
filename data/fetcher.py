@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import yfinance as yf
@@ -32,6 +33,7 @@ log = logging.getLogger(__name__)
 PRICE_COLUMNS = ("open", "high", "low", "close", "volume")
 MAX_AGE = timedelta(days=1)
 RATE_LIMIT_BACKOFF_S = 60.0
+RATE_LIMIT_COOLDOWN_S = 300.0  # after a failed retry, fail fast this long
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
@@ -116,10 +118,17 @@ class DataFetcher:
     DataFetcher per thread (the UI scan worker builds its own).
     """
 
-    def __init__(self, db_path: Path, sleep_between: float = 1.0):
+    def __init__(
+        self,
+        db_path: Path,
+        sleep_between: float = 1.0,
+        should_stop: Callable[[], bool] | None = None,
+    ):
         self.sleep_between = sleep_between
+        self.should_stop = should_stop  # lets the UI cancel mid-backoff
         self.network_fetches = 0  # exposed so tests can prove cache hits
         self._last_network_at = 0.0
+        self._rate_limited_until = 0.0
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -215,20 +224,53 @@ class DataFetcher:
 
     # ---------------------------------------------------------------- network
 
+    def _cancelled(self) -> bool:
+        return self.should_stop is not None and self.should_stop()
+
+    def _backoff(self, seconds: float) -> None:
+        """Sleep in small slices so a cancel request interrupts the wait —
+        an uninterruptible 60s sleep would freeze shutdown and, on Windows,
+        end in Qt fatally destroying a still-running thread."""
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._cancelled():
+                raise FetchError("cancelled during rate-limit backoff")
+            time.sleep(min(1.0, remaining))
+
     def _throttle(self) -> None:
         wait = self.sleep_between - (time.monotonic() - self._last_network_at)
         if wait > 0:
             time.sleep(wait)
 
     def _network_call(self, fn):
+        remaining = self._rate_limited_until - time.monotonic()
+        if remaining > 0:
+            # circuit breaker: during a sustained 429 episode, fail fast to
+            # cached/stale data instead of paying ~60s per ticker for hours
+            raise FetchError(
+                f"Yahoo rate-limit cooldown active for another {remaining:.0f}s"
+            )
+        if self._cancelled():
+            raise FetchError("cancelled")
         self._throttle()
         self.network_fetches += 1
         try:
             return fn()
         except YFRateLimitError:
             log.warning("rate limited by Yahoo; backing off %.0fs", RATE_LIMIT_BACKOFF_S)
-            time.sleep(RATE_LIMIT_BACKOFF_S)
-            return fn()
+            self._backoff(RATE_LIMIT_BACKOFF_S)
+            try:
+                return fn()
+            except YFRateLimitError:
+                self._rate_limited_until = time.monotonic() + RATE_LIMIT_COOLDOWN_S
+                log.warning(
+                    "still rate limited; cooling down %.0fs — subsequent tickers "
+                    "fall back to cache", RATE_LIMIT_COOLDOWN_S,
+                )
+                raise
         finally:
             self._last_network_at = time.monotonic()
 

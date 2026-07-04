@@ -36,8 +36,10 @@ def _linear(value: float | None, at_zero: float, at_hundred: float) -> float | N
 
 
 def _valuation(pe: float | None, peg: float | None) -> float | None:
-    pe_score = _linear(pe, 40.0, 10.0)
-    peg_score = _linear(peg, 3.0, 0.5)
+    # A negative P/E (negative earnings) or negative PEG (negative expected
+    # growth) is the WORST case; the bare linear map would clip it to 100.
+    pe_score = 0.0 if (pe is not None and pe <= 0) else _linear(pe, 40.0, 10.0)
+    peg_score = 0.0 if (peg is not None and peg <= 0) else _linear(peg, 3.0, 0.5)
     if pe_score is None and peg_score is None:
         return None
     if peg_score is None:

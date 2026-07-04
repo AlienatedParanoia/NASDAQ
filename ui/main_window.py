@@ -173,7 +173,7 @@ class ScanWorker(QObject):
 
     def run(self) -> None:
         try:
-            fetcher = DataFetcher(paths.db_path())
+            fetcher = DataFetcher(paths.db_path(), should_stop=self._stop.is_set)
             try:
                 rows = scan_universe(
                     self._tickers,
@@ -318,5 +318,9 @@ class MainWindow(QMainWindow):
             self._worker.stop()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(10_000)
+            if not self._thread.wait(10_000):
+                # never let a running QThread be destroyed — Qt aborts the
+                # process; the interruptible backoff bounds this wait to
+                # roughly one in-flight HTTP call
+                self._thread.wait()
         super().closeEvent(event)
