@@ -141,6 +141,33 @@ def main() -> None:
     _wait_portfolio_idle(app, panel)
     assert panel._table.rowCount() == 1
     print("holding removal OK")
+
+    # race regression: adding while a recompute is in flight must never
+    # persist an unvalidated (bogus) ticker
+    import json as _json
+
+    import ui.portfolio_panel as pp
+
+    pp.QMessageBox = type(
+        "MB", (), {"warning": staticmethod(lambda *a, **k: None)}
+    )
+    panel._ticker_edit.setText("PEP")
+    panel._amount_spin.setValue(500)
+    panel._on_add()  # may start a worker...
+    panel._ticker_edit.setText("ZZFAKE99")
+    panel._amount_spin.setValue(500)
+    panel._on_add()  # ...so this lands mid-flight
+    for _ in range(4):  # allow queued revalidation cycles to settle
+        _wait_portfolio_idle(app, panel)
+        if panel._thread is None and not panel._dirty and not panel._pending:
+            break
+    tickers = {h.ticker for h in panel._holdings}
+    assert "ZZFAKE99" not in tickers, tickers
+    assert "PEP" in tickers, tickers
+    saved = _json.loads(paths.portfolio_path().read_text(encoding="utf-8"))
+    saved_tickers = {h["ticker"] for h in saved["holdings"]}
+    assert "ZZFAKE99" not in saved_tickers, saved_tickers
+    print("mid-flight add race: bogus ticker neither kept nor persisted")
     tabs.setCurrentIndex(0)
 
     shot = paths.data_dir() / "ui_smoke.png"

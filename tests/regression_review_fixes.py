@@ -69,15 +69,17 @@ def negative_peg_is_not_a_buy_signal() -> None:
 
 
 def cagr_annualizes_correctly() -> None:
-    # +100% over exactly 504 return days (2 trading years) -> sqrt(2)-1 per year
+    # +100% over 504 bars; CAGR must annualize by the CALENDAR span so that
+    # non-252-day calendars (crypto, foreign listings) come out right too
     daily = 2.0 ** (1.0 / 504)
     closes = 100.0 * daily ** np.arange(505)
     px = _df(closes)
     bt = run_backtest(px, pd.Series(1.0, index=px.index))
+    years = (px.index[-1] - px.index[1]).days / 365.25  # returns start at bar 2
     assert abs(bt.total_return - 1.0) < 1e-6, bt.total_return
-    assert abs(bt.years - 2.0) < 1e-9, bt.years
-    assert abs(bt.cagr - (2.0 ** 0.5 - 1.0)) < 1e-6, bt.cagr
-    print(f"CAGR sanity: +100% over {bt.years:.1f}y -> {bt.cagr:+.2%}/yr")
+    assert abs(bt.years - years) < 1e-9, (bt.years, years)
+    assert abs(bt.cagr - (2.0 ** (1.0 / years) - 1.0)) < 1e-6, bt.cagr
+    print(f"CAGR sanity: +100% over {bt.years:.2f} calendar years -> {bt.cagr:+.2%}/yr")
 
 
 def backoff_interruptible_and_breaker_fails_fast() -> None:
@@ -92,14 +94,19 @@ def backoff_interruptible_and_breaker_fails_fast() -> None:
     cancelled.close()
 
     cooled = DataFetcher(paths.db_path())
-    cooled._rate_limited_until = time.monotonic() + 300.0
+    DataFetcher._shared_cooldown_until = time.monotonic() + 300.0  # shared breaker
     try:
-        cooled._network_call(lambda: (_ for _ in ()).throw(RuntimeError("no network!")))
-        raise AssertionError("cooldown should fail fast without a network call")
-    except FetchError as e:
-        assert "cooldown" in str(e)
-    assert cooled.network_fetches == 0
-    cooled.close()
+        try:
+            cooled._network_call(
+                lambda: (_ for _ in ()).throw(RuntimeError("no network!"))
+            )
+            raise AssertionError("cooldown should fail fast without a network call")
+        except FetchError as e:
+            assert "cooldown" in str(e)
+        assert cooled.network_fetches == 0
+    finally:
+        DataFetcher._shared_cooldown_until = 0.0
+        cooled.close()
     print("interruptible backoff + rate-limit circuit breaker OK")
 
 

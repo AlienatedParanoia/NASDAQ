@@ -65,6 +65,15 @@ DISCLAIMER = (
     "window, not live P&L. No costs/slippage; past performance guarantees nothing."
 )
 
+# error fragments that mean "network hiccup", not "bad symbol" — a new ticker
+# failing this way stays pending instead of being rejected
+_TRANSIENT_MARKERS = ("cooldown", "cancelled", "rate limit", "timed out", "curl")
+
+
+def _looks_transient(error: str) -> bool:
+    e = error.lower()
+    return any(marker in e for marker in _TRANSIENT_MARKERS)
+
 
 def _money(v: float) -> str:
     sign = "+" if v >= 0 else "-"
@@ -111,7 +120,8 @@ class PortfolioPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: PortfolioWorker | None = None
         self._dirty = False
-        self._pending_ticker: str | None = None
+        # tickers added but not yet validated by a worker report; never saved
+        self._pending: set[str] = set()
 
         # -- add-holding row
         self._ticker_edit = QLineEdit()
@@ -216,6 +226,15 @@ class PortfolioPanel(QWidget):
 
     # ------------------------------------------------------------ mutations
 
+    def _persist(self) -> None:
+        """Save everything except still-unvalidated pending tickers."""
+        keep = [h for h in self._holdings if h.ticker not in self._pending]
+        try:
+            save_portfolio(keep)
+        except OSError as e:
+            log.exception("portfolio save failed")
+            self._status.setText(f"WARNING: portfolio not saved: {e}")
+
     def _on_add(self) -> None:
         ticker = self._ticker_edit.text().strip().upper()
         if not ticker:
@@ -226,16 +245,17 @@ class PortfolioPanel(QWidget):
         if existing is not None:
             existing.amount += amount
             existing.strategy = strategy
-            save_portfolio(self._holdings)  # already validated previously
+            self._persist()  # already validated previously
         else:
             self._holdings.append(Holding(ticker, amount, strategy))
-            self._pending_ticker = ticker  # persisted only after validation
+            self._pending.add(ticker)  # persisted only after validation
         self._ticker_edit.clear()
         self.recompute()
 
     def _on_remove(self, ticker: str) -> None:
         self._holdings = [h for h in self._holdings if h.ticker != ticker]
-        save_portfolio(self._holdings)
+        self._pending.discard(ticker)
+        self._persist()
         self.recompute()
 
     def _on_row_strategy_changed(self, ticker: str, combo: QComboBox) -> None:
@@ -243,30 +263,45 @@ class PortfolioPanel(QWidget):
         for h in self._holdings:
             if h.ticker == ticker:
                 h.strategy = value
-        save_portfolio(self._holdings)
+        self._persist()
         self.recompute()
 
     # -------------------------------------------------------------- results
 
     def _on_report(self, report: PortfolioReport) -> None:
         self._teardown()
-        if self._pending_ticker is not None:
-            pending = self._pending_ticker
-            self._pending_ticker = None
+        rejected: list[tuple[str, str]] = []
+        for pending in sorted(self._pending):
             res = next(
                 (r for r in report.results if r.holding.ticker == pending), None
             )
-            if res is not None and res.error is not None:
-                self._holdings = [h for h in self._holdings if h.ticker != pending]
-                QMessageBox.warning(
-                    self,
-                    "Ticker not added",
-                    f"{pending}: Yahoo returned no data ({res.error}).\n"
-                    "Check the symbol and try again.",
+            if res is None:
+                # report predates this add — validate against the next one
+                # (one is already queued: _on_add always calls recompute)
+                continue
+            if res.error is None:
+                self._pending.discard(pending)
+            elif _looks_transient(res.error):
+                # can't tell a bad symbol from a network hiccup; keep it
+                # pending (and unsaved) so a later recompute decides
+                self._status.setText(
+                    f"{pending}: not validated yet ({res.error}) — will retry."
                 )
-                self.recompute()
-                return
-            save_portfolio(self._holdings)
+            else:
+                self._holdings = [h for h in self._holdings if h.ticker != pending]
+                self._pending.discard(pending)
+                rejected.append((pending, res.error))
+        self._persist()
+        if rejected:
+            QMessageBox.warning(
+                self,
+                "Ticker not added",
+                "\n".join(f"{t}: Yahoo returned no data ({e})" for t, e in rejected)
+                + "\nCheck the symbol and try again.",
+            )
+            self._dirty = False
+            self.recompute()
+            return
         self._report = report
         self._render(report)
         if self._dirty:
@@ -275,7 +310,12 @@ class PortfolioPanel(QWidget):
 
     def _on_failed(self, err: str) -> None:
         self._teardown()
-        self._pending_ticker = None
+        if self._pending:
+            # never keep holdings that were never validated
+            self._holdings = [
+                h for h in self._holdings if h.ticker not in self._pending
+            ]
+            self._pending.clear()
         self._status.setText(f"Portfolio analysis failed: {err}")
         if self._dirty:
             self._dirty = False

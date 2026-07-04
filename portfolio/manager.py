@@ -26,7 +26,7 @@ import paths
 from classifier.classify import Bucket
 from data.fetcher import DataFetcher, FetchError
 from signals.signal_generator import ScanRow, generate_signal
-from strategies.backtest_engine import TRADING_DAYS, perf_stats
+from strategies.backtest_engine import perf_stats, time_base
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,12 @@ def load_portfolio(path: Path | None = None) -> list[Holding]:
     except Exception:
         log.exception("portfolio file unreadable; starting empty (backup kept)")
         try:
-            path.replace(path.with_suffix(".json.bak"))
+            backup = path.with_suffix(".json.bak")
+            n = 1
+            while backup.exists():  # never clobber an earlier (maybe good) backup
+                backup = path.with_suffix(f".json.bak{n}")
+                n += 1
+            path.replace(backup)
         except OSError:
             pass
         return []
@@ -81,7 +86,10 @@ def save_portfolio(holdings: Sequence[Holding], path: Path | None = None) -> Non
             for h in holdings
         ],
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # atomic replace: a crash mid-write must never leave a truncated file
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------- analysis
@@ -125,6 +133,7 @@ class JointMetrics:
     years: float
     n_bars: int
     common_start: pd.Timestamp
+    excluded: list[str]  # holdings whose history ends before the joint window
 
 
 def joint_metrics(
@@ -134,14 +143,26 @@ def joint_metrics(
 
     Aligns on the intersection window (latest common start; union calendar
     inside it with missing days as 0), builds the dollar-weighted equity
-    curve, and measures everything on its daily returns. Returns None when
-    fewer than 2 common bars exist.
+    curve, and measures everything on its daily returns. Annualization is
+    calendar-based (see time_base) so mixed calendars — crypto's 7-day week,
+    foreign holidays — don't skew years/CAGR/vol. A holding whose history
+    ENDS before the joint window opens is excluded (it would otherwise sit
+    in the frame as zero-filled 'cash'). Returns None when fewer than 2
+    common bars exist.
     """
     tickers = [t for t, s in series.items() if len(s) > 0]
+    excluded: list[str] = []
+    common_start = None
+    while tickers:
+        common_start = max(series[t].index[0] for t in tickers)
+        dead = [t for t in tickers if series[t].index[-1] < common_start]
+        if not dead:
+            break
+        excluded.extend(dead)
+        tickers = [t for t in tickers if t not in dead]
     if not tickers:
         return None
     frame = pd.DataFrame({t: series[t] for t in tickers})
-    common_start = max(series[t].index[0] for t in tickers)
     frame = frame.loc[frame.index >= common_start].fillna(0.0)
     if len(frame) < 2:
         return None
@@ -156,7 +177,8 @@ def joint_metrics(
     r_port = port_equity.pct_change()
     r_port.iloc[0] = port_equity.iloc[0] - 1.0  # return from the implicit 1.0 start
     total, sharpe, drawdown, cagr, _ = perf_stats(r_port)
-    ann_vol = float(r_port.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(r_port) > 1 else 0.0
+    years, ppy = time_base(r_port)
+    ann_vol = float(r_port.std(ddof=1) * np.sqrt(ppy)) if len(r_port) > 1 else 0.0
 
     return JointMetrics(
         common_returns={t: float(equities[t].iloc[-1] - 1.0) for t in tickers},
@@ -165,9 +187,10 @@ def joint_metrics(
         max_drawdown=drawdown,
         cagr=cagr,
         ann_vol=ann_vol,
-        years=len(r_port) / TRADING_DAYS,
+        years=years,
         n_bars=len(r_port),
         common_start=common_start,
+        excluded=excluded,
     )
 
 
@@ -253,6 +276,13 @@ def analyze_portfolio(
     jm = joint_metrics({t: series[t] for t in invested}, invested)
     if jm is None:
         return _empty_report(results, total_invested, skipped + sorted(invested))
+    if jm.excluded:
+        gone = set(jm.excluded)
+        skipped.extend(sorted(gone))
+        usable = [res for res in usable if res.holding.ticker not in gone]
+        invested = {t: a for t, a in invested.items() if t not in gone}
+        if not usable:
+            return _empty_report(results, total_invested, skipped)
 
     for res in usable:
         res.common_return = jm.common_returns[res.holding.ticker]

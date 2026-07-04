@@ -55,6 +55,30 @@ def diversification_shows_up() -> None:
     )
 
 
+def calendar_aware_annualization() -> None:
+    # a 7-day/week asset must not be annualized as if it had 252 bars/yr:
+    # a true +100%/yr crypto-calendar series must report ~+100%/yr, not ~+61%
+    idx = pd.date_range("2024-01-01", periods=731, freq="D")  # ~2 calendar years
+    r = pd.Series(2.0 ** (1.0 / 365.25) - 1.0, index=idx)
+    jm = joint_metrics({"BTC": r}, {"BTC": 1000.0})
+    assert jm is not None
+    assert abs(jm.years - 2.0) < 0.01, jm.years
+    assert abs(jm.cagr - 1.0) < 0.02, jm.cagr
+    print(f"calendar-aware: 7-day asset reports {jm.years:.2f}y, CAGR {jm.cagr:+.0%}/yr")
+
+
+def dead_series_excluded() -> None:
+    # history that ENDS before the joint window opens must be excluded,
+    # not silently zero-filled into a flat "cash" position
+    a = pd.Series(0.001, index=pd.bdate_range("2024-01-01", periods=300))
+    b = pd.Series(0.001, index=pd.bdate_range("2023-01-02", periods=100))
+    jm = joint_metrics({"A": a, "B": b}, {"A": 1000.0, "B": 1000.0})
+    assert jm is not None
+    assert jm.excluded == ["B"], jm.excluded
+    assert "B" not in jm.common_returns
+    print("dead-history holding excluded from joint metrics, not counted as cash")
+
+
 def persistence_roundtrip_and_corruption() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "portfolio.json"
@@ -153,6 +177,8 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     joint_math_hand_check()
     diversification_shows_up()
+    calendar_aware_annualization()
+    dead_series_excluded()
     persistence_roundtrip_and_corruption()
     fetcher = DataFetcher(paths.db_path())
     try:

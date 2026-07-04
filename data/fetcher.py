@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -120,6 +121,13 @@ class DataFetcher:
     DataFetcher per thread (the UI scan worker builds its own).
     """
 
+    # shared across ALL fetcher instances (scanner + portfolio workers can run
+    # concurrently): one Yahoo request at a time, one pacing clock, and one
+    # rate-limit circuit breaker for the whole process
+    _net_lock = threading.Lock()
+    _shared_last_net = 0.0
+    _shared_cooldown_until = 0.0
+
     def __init__(
         self,
         db_path: Path,
@@ -129,8 +137,6 @@ class DataFetcher:
         self.sleep_between = sleep_between
         self.should_stop = should_stop  # lets the UI cancel mid-backoff
         self.network_fetches = 0  # exposed so tests can prove cache hits
-        self._last_network_at = 0.0
-        self._rate_limited_until = 0.0
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -251,13 +257,21 @@ class DataFetcher:
                 raise FetchError("cancelled during rate-limit backoff")
             time.sleep(min(1.0, remaining))
 
-    def _throttle(self) -> None:
-        wait = self.sleep_between - (time.monotonic() - self._last_network_at)
-        if wait > 0:
-            time.sleep(wait)
+    def _attempt(self, fn):
+        """One paced network attempt. The lock serializes requests across all
+        fetcher instances so combined traffic never exceeds ~1 req/s."""
+        with DataFetcher._net_lock:
+            wait = self.sleep_between - (time.monotonic() - DataFetcher._shared_last_net)
+            if wait > 0:
+                time.sleep(wait)
+            self.network_fetches += 1
+            try:
+                return fn()
+            finally:
+                DataFetcher._shared_last_net = time.monotonic()
 
     def _network_call(self, fn):
-        remaining = self._rate_limited_until - time.monotonic()
+        remaining = DataFetcher._shared_cooldown_until - time.monotonic()
         if remaining > 0:
             # circuit breaker: during a sustained 429 episode, fail fast to
             # cached/stale data instead of paying ~60s per ticker for hours
@@ -266,24 +280,22 @@ class DataFetcher:
             )
         if self._cancelled():
             raise FetchError("cancelled")
-        self._throttle()
-        self.network_fetches += 1
         try:
-            return fn()
+            return self._attempt(fn)
         except YFRateLimitError:
             log.warning("rate limited by Yahoo; backing off %.0fs", RATE_LIMIT_BACKOFF_S)
             self._backoff(RATE_LIMIT_BACKOFF_S)
             try:
-                return fn()
+                return self._attempt(fn)
             except YFRateLimitError:
-                self._rate_limited_until = time.monotonic() + RATE_LIMIT_COOLDOWN_S
+                DataFetcher._shared_cooldown_until = (
+                    time.monotonic() + RATE_LIMIT_COOLDOWN_S
+                )
                 log.warning(
                     "still rate limited; cooling down %.0fs — subsequent tickers "
                     "fall back to cache", RATE_LIMIT_COOLDOWN_S,
                 )
                 raise
-        finally:
-            self._last_network_at = time.monotonic()
 
     def _fetch_prices(self, ticker: str) -> pd.DataFrame:
         df = self._network_call(
@@ -340,18 +352,25 @@ class DataFetcher:
         price data exists at all; a failed fundamentals fetch degrades to the
         cached row (or None)."""
         stale = False
+        price_error: str | None = None
 
         if force or not self._is_fresh(ticker, "prices"):
             try:
                 self._store_prices(ticker, self._fetch_prices(ticker))
             except Exception as e:
                 log.warning("%s: price fetch failed: %s", ticker, e)
+                price_error = str(e)
                 with self._conn:
-                    self._mark(ticker, "prices", "failed", str(e))
+                    self._mark(ticker, "prices", "failed", price_error)
                 stale = True
         prices = self._load_prices(ticker)
         if prices.empty:
-            raise FetchError(f"{ticker}: no usable price data (fetch failed, cache empty)")
+            # include the cause so callers can tell "bad symbol" from
+            # transient failures (cooldown/cancelled/timeouts)
+            raise FetchError(
+                f"{ticker}: no usable price data "
+                f"({price_error or 'fetch failed, cache empty'})"
+            )
 
         if force or not self._is_fresh(ticker, "fundamentals"):
             try:

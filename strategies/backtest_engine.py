@@ -46,6 +46,19 @@ class BacktestResult:
     returns: pd.Series | None = None  # daily strategy returns (portfolio math)
 
 
+def time_base(returns: pd.Series) -> tuple[float, float]:
+    """(span in calendar years, observed bars per year) for a return series.
+
+    Calendar-based rather than a hardcoded 252 so non-equity calendars
+    (crypto trades ~365 days/yr, foreign listings differ too) annualize
+    correctly; falls back to 252 for non-datetime indexes."""
+    n = len(returns)
+    if n > 1 and isinstance(returns.index, pd.DatetimeIndex):
+        years = max((returns.index[-1] - returns.index[0]).days, 1) / 365.25
+        return years, n / years
+    return n / TRADING_DAYS, float(TRADING_DAYS)
+
+
 def perf_stats(returns: pd.Series) -> tuple[float, float, float, float, pd.Series]:
     """(total_return, sharpe, max_drawdown, cagr, equity) for a daily return
     series. Shared by the backtest engine and the portfolio aggregation so
@@ -54,15 +67,15 @@ def perf_stats(returns: pd.Series) -> tuple[float, float, float, float, pd.Serie
     if len(equity) == 0:
         return 0.0, 0.0, 0.0, 0.0, equity
     total = float(equity.iloc[-1] - 1.0)
+    years, ppy = time_base(returns)
     std = returns.std(ddof=1)
     sharpe = 0.0
     if pd.notna(std) and std > 0:
-        sharpe = float(returns.mean() / std * np.sqrt(TRADING_DAYS))
+        sharpe = float(returns.mean() / std * np.sqrt(ppy))
     # the peak includes the starting capital of 1.0, else a window that opens
     # with a decline understates its drawdown by the first bar's loss
     peak = equity.cummax().clip(lower=1.0)
     drawdown = float(min((equity / peak - 1.0).min(), 0.0))
-    years = len(returns) / TRADING_DAYS
     cagr = float((1.0 + total) ** (1.0 / years) - 1.0) if years > 0 else 0.0
     return total, sharpe, drawdown, cagr, equity
 
@@ -130,7 +143,7 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
         positions=pos,
         equity=equity,
         trades=trades,
-        years=len(r) / TRADING_DAYS,
+        years=time_base(r)[0],
         cagr=cagr,
         bh_cagr=bh_cagr,
         returns=strat_returns,
