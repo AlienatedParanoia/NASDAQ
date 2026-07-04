@@ -39,12 +39,32 @@ once a day, so later scans take seconds.
    (Sharpe ≥ 0.5 and positive return), with the reasoning string citing the
    actual numbers and ending with the strategy's exit cue.
 
+## Paper portfolio
+
+The Portfolio tab holds a persistent paper portfolio: add **any Yahoo ticker**
+with a dollar amount, and optionally pick the strategy per holding — by
+default each holding runs the classifier-recommended strategy, and switching
+the strategy re-runs that holding's verdict and returns under the new rules.
+
+What the numbers mean: each holding is backtested under its strategy over the
+selected 2/5/10-year window; holdings combine with **buy-and-hold dollar
+weighting** on the **common window** (limited by the youngest holding, which
+the summary names), so overall profit equals the sum of per-holding profits
+while risk/Sharpe/drawdown are measured on the combined day-by-day series —
+diversification between holdings genuinely lowers the risk number. Risk
+labels: Low < 15%/yr vol, Moderate < 25%, High < 40%, else Very high.
+
+The portfolio is stored in `portfolio.json` next to the cache (it survives
+cache resets). It is a paper portfolio: historical backtest numbers, not live
+P&L, with the usual caveats (no costs/slippage, survivorship-flattered
+long windows).
+
 ## Tests
 
 Each build phase has a runnable check under `tests/` (run from the repo root
 with `python -m tests.<name>`): `phase1_data_check`, `phase2_indicator_check`,
 `phase2_universe_check`, `phase3_backtest_check`, `phase4_signal_check`,
-`phase5_ui_smoke`, and `regression_review_fixes`.
+`phase5_ui_smoke`, `phase6_portfolio_check`, and `regression_review_fixes`.
 
 ## Build the Windows exe
 

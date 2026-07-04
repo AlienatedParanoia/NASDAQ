@@ -43,9 +43,13 @@ class BacktestResult:
     years: float                     # evaluation window span in trading years
     cagr: float                      # annualized total_return over that span
     bh_cagr: float
+    returns: pd.Series | None = None  # daily strategy returns (portfolio math)
 
 
-def _perf(returns: pd.Series) -> tuple[float, float, float, float, pd.Series]:
+def perf_stats(returns: pd.Series) -> tuple[float, float, float, float, pd.Series]:
+    """(total_return, sharpe, max_drawdown, cagr, equity) for a daily return
+    series. Shared by the backtest engine and the portfolio aggregation so
+    both use identical formulas."""
     equity = (1.0 + returns).cumprod()
     if len(equity) == 0:
         return 0.0, 0.0, 0.0, 0.0, equity
@@ -100,7 +104,7 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
             total_return=0.0, sharpe=0.0, max_drawdown=0.0,
             bh_total_return=0.0, bh_sharpe=0.0, bh_max_drawdown=0.0,
             n_trades=0, positions=pos.dropna(), equity=empty, trades=[],
-            years=0.0, cagr=0.0, bh_cagr=0.0,
+            years=0.0, cagr=0.0, bh_cagr=0.0, returns=empty,
         )
 
     pos = pos.loc[window].astype(float)
@@ -111,8 +115,8 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
     r = close_w.pct_change().iloc[1:]
     strat_returns = pos.iloc[1:] * r
 
-    total, sharpe, dd, cagr, equity = _perf(strat_returns)
-    bh_total, bh_sharpe, bh_dd, bh_cagr, _ = _perf(r)
+    total, sharpe, dd, cagr, equity = perf_stats(strat_returns)
+    bh_total, bh_sharpe, bh_dd, bh_cagr, _ = perf_stats(r)
     trades = _extract_trades(close_w, pos)
 
     return BacktestResult(
@@ -129,4 +133,5 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
         years=len(r) / TRADING_DAYS,
         cagr=cagr,
         bh_cagr=bh_cagr,
+        returns=strat_returns,
     )

@@ -33,6 +33,12 @@ def log_path() -> Path:
     return data_dir() / "advisor.log"
 
 
+def portfolio_path() -> Path:
+    # user data, deliberately separate from cache.db (which is wiped on
+    # CACHE_VERSION bumps)
+    return data_dir() / "portfolio.json"
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """File logging always (a --windowed exe has no stderr), console in dev."""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")

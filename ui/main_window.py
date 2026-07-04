@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +43,7 @@ from data.fetcher import DataFetcher
 from data.universe import get_universe
 from signals.signal_generator import ScanRow, Signal, scan_universe
 from ui.detail_panel import DetailPanel
+from ui.portfolio_panel import PortfolioPanel
 
 log = logging.getLogger(__name__)
 
@@ -261,7 +263,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._detail)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        self.setCentralWidget(splitter)
+
+        self._portfolio = PortfolioPanel(lambda: self._window_box.currentData())
+        tabs = QTabWidget()
+        tabs.addTab(splitter, "Scanner")
+        tabs.addTab(self._portfolio, "Portfolio")
+        self.setCentralWidget(tabs)
 
         self._thread: QThread | None = None
         self._worker: ScanWorker | None = None
@@ -324,6 +331,7 @@ class MainWindow(QMainWindow):
         # data is cached, so re-analyzing under the new window is seconds
         if self._thread is None and self._has_scanned:
             self._start_scan()
+        self._portfolio.recompute()
 
     def _on_bucket_filter(self, index: int) -> None:
         self._proxy.set_bucket_filter(None if index == 0 else self._bucket_box.currentText())
@@ -335,6 +343,7 @@ class MainWindow(QMainWindow):
         self._detail.show_row(self._model.row_at(source.row()))
 
     def closeEvent(self, event) -> None:
+        self._portfolio.shutdown()
         if self._worker is not None:
             self._worker.stop()
         if self._thread is not None:

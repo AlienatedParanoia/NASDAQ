@@ -12,7 +12,7 @@ from typing import Callable, Sequence
 import pandas as pd
 
 from classifier.classify import Bucket, classify, compute_metrics
-from data.fetcher import DataFetcher, FetchError, StockData
+from data.fetcher import DataFetcher, FetchError, Fundamentals, StockData
 from strategies import indicators as ind
 from strategies.backtest_engine import BacktestResult, Trade, run_backtest
 from strategies.long_term import LongTermStrategy, composite_score
@@ -52,6 +52,7 @@ class ScanRow:
     trades: list[Trade] = field(default_factory=list)
     overlay: dict[str, pd.Series] = field(default_factory=dict)
     error: str | None = None
+    returns: pd.Series | None = None  # daily strategy returns, for portfolio math
 
 
 def _quality(bt: BacktestResult) -> bool:
@@ -101,6 +102,7 @@ def _row(data: StockData, bucket: Bucket, signal: Signal | None, bt: BacktestRes
         prices=data.prices,
         trades=bt.trades,
         overlay=overlay,
+        returns=bt.returns,
     )
 
 
@@ -165,8 +167,12 @@ def _long_term_row(data: StockData, rule_trace: str) -> ScanRow:
     strat = LongTermStrategy()
     px = data.prices
     bt = run_backtest(px, strat.positions(px))
-    assert data.fundamentals is not None  # the long-term gates require them
-    score, components, n_missing = composite_score(data.fundamentals)
+    # fundamentals can be None when the user forces long-term on a stock the
+    # classifier never gated; all-missing flows into the insufficient-data path
+    f = data.fundamentals or Fundamentals(
+        data.ticker, None, None, None, None, None, None, None, None
+    )
+    score, components, n_missing = composite_score(f)
 
     comp_txt = ", ".join(
         f"{k} {v:.0f}" if v is not None else f"{k} missing"
@@ -205,11 +211,19 @@ def _long_term_row(data: StockData, rule_trace: str) -> ScanRow:
     return _row(data, Bucket.LONG_TERM, signal, bt, reasoning, strat.overlays(px))
 
 
-def generate_signal(data: StockData, window_years: int = 10) -> ScanRow:
+def generate_signal(
+    data: StockData,
+    window_years: int = 10,
+    strategy_override: Bucket | None = None,
+) -> ScanRow:
     """Analyze one stock over the trailing `window_years`. The cache always
     holds the full fetch span; the slice here controls the backtest, the
     chart, and the markers together. Classifier metrics are trailing-window
-    latest values, so the bucket is identical for any window >= 2 years."""
+    latest values, so the bucket is identical for any window >= 2 years.
+
+    `strategy_override` (portfolio feature) runs that strategy regardless of
+    the classified bucket; the row's bucket then reports the strategy that
+    actually ran, and the reasoning names the classifier's recommendation."""
     if window_years > 0 and len(data.prices):
         cutoff = data.prices.index[-1] - pd.DateOffset(years=window_years)
         data = StockData(
@@ -218,7 +232,14 @@ def generate_signal(data: StockData, window_years: int = 10) -> ScanRow:
             fundamentals=data.fundamentals,
             stale=data.stale,
         )
-    bucket, rule_trace = classify(compute_metrics(data))
+    classified, rule_trace = classify(compute_metrics(data))
+    if strategy_override is Bucket.UNCLASSIFIED:
+        strategy_override = None
+    bucket = strategy_override if strategy_override is not None else classified
+    if strategy_override is not None and strategy_override is not classified:
+        rule_trace = (
+            f"strategy chosen manually — classifier recommends {classified}"
+        )
     if bucket is Bucket.TREND:
         row = _trend_row(data, rule_trace)
     elif bucket is Bucket.MEAN_REVERSION:

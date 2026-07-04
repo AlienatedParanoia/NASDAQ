@@ -7,7 +7,9 @@ Run from the project root: python -m tests.phase5_ui_smoke
 from __future__ import annotations
 
 import os
+import tempfile
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,6 +18,19 @@ from data.fetcher import configure_yfinance  # noqa: E402
 
 SUBSET = ["AAPL", "MSFT", "NVDA", "KHC", "PEP", "TSLA", "PLTR", "XEL"]
 NEG_INF = float("-inf")
+
+# isolate the smoke test's portfolio from the user's real portfolio.json
+_TMP_PORTFOLIO_DIR = tempfile.mkdtemp()
+paths.portfolio_path = lambda: Path(_TMP_PORTFOLIO_DIR) / "portfolio.json"
+
+
+def _wait_portfolio_idle(app, panel, timeout: float = 180.0) -> None:
+    deadline = time.monotonic() + timeout
+    while (panel._thread is not None or panel._dirty) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    assert panel._thread is None, "portfolio worker did not finish in time"
+    app.processEvents()
 
 
 def main() -> None:
@@ -76,6 +91,57 @@ def main() -> None:
     app.processEvents()
     assert win._detail._text.toPlainText(), "detail reasoning empty after selection"
     print("detail panel OK")
+
+    # ---- portfolio tab ----
+    from classifier.classify import Bucket
+
+    tabs = win.centralWidget()
+    tabs.setCurrentIndex(1)
+    panel = win._portfolio
+    assert panel._table.rowCount() == 0
+
+    panel._ticker_edit.setText("AAPL")
+    panel._amount_spin.setValue(1000)
+    panel._on_add()
+    _wait_portfolio_idle(app, panel)
+    panel._ticker_edit.setText("NVDA")
+    panel._amount_spin.setValue(3000)
+    panel._on_add()
+    _wait_portfolio_idle(app, panel)
+
+    assert panel._table.rowCount() == 2, panel._table.rowCount()
+    summary = panel._summary.text()
+    assert "Invested $4,000" in summary and "Sharpe" in summary, summary
+    print(f"portfolio summary OK: {summary[:110]}…")
+
+    nvda_row = next(
+        i for i in range(panel._table.rowCount())
+        if panel._table.item(i, 0).text() == "NVDA"
+    )
+    return_before = panel._table.item(nvda_row, 5).text()
+    combo = panel._table.cellWidget(nvda_row, 3)
+    combo.setCurrentIndex(1)  # Trend
+    _wait_portfolio_idle(app, panel)
+    nvda = next(h for h in panel._holdings if h.ticker == "NVDA")
+    assert nvda.strategy == Bucket.TREND.value, nvda.strategy
+    nvda_res = next(
+        r for r in panel._report.results if r.holding.ticker == "NVDA"
+    )
+    assert nvda_res.row.bucket is Bucket.TREND
+    nvda_row = next(
+        i for i in range(panel._table.rowCount())
+        if panel._table.item(i, 0).text() == "NVDA"
+    )
+    print(
+        f"strategy switch OK: NVDA return {return_before} -> "
+        f"{panel._table.item(nvda_row, 5).text()} under Trend"
+    )
+
+    panel._on_remove("AAPL")
+    _wait_portfolio_idle(app, panel)
+    assert panel._table.rowCount() == 1
+    print("holding removal OK")
+    tabs.setCurrentIndex(0)
 
     shot = paths.data_dir() / "ui_smoke.png"
     win.grab().save(str(shot))
