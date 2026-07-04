@@ -207,7 +207,14 @@ def main() -> None:
     assert aapl_lot.money_out == 1750.0 and aapl_lot.sell_date
     aapl_res = next(r for r in inv._report.results if r.lot.ticker == "AAPL")
     assert abs(aapl_res.pnl - 750.0) < 1e-9
-    print("sell flow OK: AAPL closed at entered proceeds")
+    aapl_row = next(
+        i for i in range(inv._table.rowCount())
+        if inv._table.item(i, 0).text() == "AAPL"
+    )
+    assert inv._table.cellWidget(aapl_row, 10) is None, (
+        "stale Sell button survived the open->sold re-render"
+    )
+    print("sell flow OK: AAPL closed at entered proceeds, Sell button removed")
 
     # bogus ticker never persisted
     inv._sold_check.setChecked(False)

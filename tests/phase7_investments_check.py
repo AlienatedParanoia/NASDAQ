@@ -110,6 +110,56 @@ def clamped_and_short_holds(fetcher: DataFetcher) -> None:
     print("history clamp noted; <30-day holds not annualized")
 
 
+def sale_day_curve_ends_at_proceeds(fetcher: DataFetcher) -> None:
+    """Review regressions: the V(t) contribution must switch to the entered
+    proceeds ON the sale day (including same-day sales on the latest bar),
+    and stale price data must be flagged."""
+    from portfolio.tracker import _analyze_lot
+
+    data = fetcher.get_stock("AAPL")
+    px = data.prices
+    old = str(px.index[-250].date())
+
+    # sale on the latest bar: curve endpoint must equal the entered proceeds
+    same_day = Lot("AAPL", 1000.0, old, money_out=5000.0,
+                   sell_date=str(px.index[-1].date()))
+    _, curve = _analyze_lot(same_day, data)
+    assert curve.iloc[-1] == 5000.0, curve.iloc[-1]
+
+    # past sale: the sale DAY itself carries the proceeds, not the market close
+    past = Lot("AAPL", 1000.0, old, money_out=1234.0,
+               sell_date=str(px.index[-10].date()))
+    res, curve2 = _analyze_lot(past, data)
+    assert curve2.loc[px.index[-10]] == 1234.0
+    assert curve2.iloc[-1] == 1234.0
+
+    from data.fetcher import StockData
+
+    stale_data = StockData(ticker="AAPL", prices=px, fundamentals=None, stale=True)
+    res_stale, _ = _analyze_lot(Lot("AAPL", 1000.0, old), stale_data)
+    assert res_stale.note is not None and "out of date" in res_stale.note
+    print("sale-day proceeds in V(t) + stale-price note OK")
+
+
+def structurally_bad_files_are_backed_up() -> None:
+    """Review regression: valid JSON with the wrong structure must be backed
+    up before the app can overwrite it."""
+    from portfolio.manager import load_portfolio
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "investments.json"
+        p.write_text(json.dumps({"lots": "not-a-list"}), encoding="utf-8")
+        assert load_investments(p) == []
+        assert p.with_suffix(".json.bak").exists(), "structural damage not backed up"
+        assert not p.exists()
+
+        q = Path(tmp) / "portfolio.json"
+        q.write_text(json.dumps({"holdings": 42}), encoding="utf-8")
+        assert load_portfolio(q) == []
+        assert q.with_suffix(".json.bak").exists()
+    print("structurally-bad user files are backed up, not silently overwritten")
+
+
 def persistence_roundtrip_and_corruption() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "investments.json"
@@ -129,6 +179,7 @@ def persistence_roundtrip_and_corruption() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     persistence_roundtrip_and_corruption()
+    structurally_bad_files_are_backed_up()
     fetcher = DataFetcher(paths.db_path())
     try:
         shares_and_worth_math(fetcher)
@@ -136,6 +187,7 @@ def main() -> None:
         sold_lot_uses_entered_amounts(fetcher)
         overall_report_identities(fetcher)
         clamped_and_short_holds(fetcher)
+        sale_day_curve_ends_at_proceeds(fetcher)
     finally:
         fetcher.close()
     print("PHASE 7 INVESTMENT CHECKS PASSED")

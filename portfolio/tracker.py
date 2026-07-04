@@ -23,7 +23,7 @@ import pandas as pd
 import paths
 from data.fetcher import DataFetcher, FetchError, StockData
 from portfolio.manager import risk_label
-from portfolio.storage import read_json_or_backup, write_json_atomic
+from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
 from signals.signal_generator import ScanRow, Signal, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
 
@@ -63,7 +63,10 @@ def load_investments(path: Path | None = None) -> list[Lot]:
             if float(entry["money_in"]) > 0
         ]
     except Exception:
+        # structurally wrong but valid JSON: back it up too, or the next
+        # save silently overwrites the user's data
         log.exception("investments file has unexpected structure; starting empty")
+        backup_file(path)
         return []
 
 
@@ -130,9 +133,9 @@ def _analyze_lot(lot: Lot, data: StockData) -> tuple[LotResult, pd.Series]:
     indexed on the stock's own calendar)."""
     close = data.prices["close"]
     buy_ts = pd.Timestamp(lot.buy_date)
-    note = None
+    notes: list[str] = []
     if buy_ts < close.index[0]:
-        note = (
+        notes.append(
             f"{lot.ticker}: buy date {lot.buy_date} predates available history — "
             f"using earliest close ({close.index[0].date()})"
         )
@@ -140,9 +143,15 @@ def _analyze_lot(lot: Lot, data: StockData) -> tuple[LotResult, pd.Series]:
     if held.empty:
         # bought after the latest cached bar (e.g. today, pre-close)
         held = close.iloc[-1:]
-        note = (
+        notes.append(
             f"{lot.ticker}: buy date {lot.buy_date} is after the latest data — "
             f"valued from the latest close"
+        )
+    age_days = (pd.Timestamp.today().normalize() - close.index[-1]).days
+    if data.stale or age_days > 5:
+        notes.append(
+            f"{lot.ticker}: prices last updated {close.index[-1].date()} — "
+            f"worth may be out of date"
         )
     buy_eff = held.index[0]
     shares = lot.money_in / float(held.iloc[0])
@@ -188,12 +197,17 @@ def _analyze_lot(lot: Lot, data: StockData) -> tuple[LotResult, pd.Series]:
     else:
         held_idx = (close.index >= buy_eff) & (close.index <= end_ts)
         value.loc[held_idx] = shares * close.loc[held_idx]
+        # the sale day itself ends at the entered proceeds (your real fill),
+        # which also keeps V(t)'s endpoint equal to current_value when the
+        # sale lands on the latest bar
+        value.loc[end_ts] = float(lot.money_out)
         value.loc[close.index > end_ts] = float(lot.money_out)
 
     result = LotResult(
         lot=lot, shares=shares, worth=worth, pnl=pnl, ret=ret,
         annualized=annualized, ann_vol=ann_vol, max_dd=max_dd,
-        signal=signal, scan_row=scan_row, buy_eff=buy_eff, note=note,
+        signal=signal, scan_row=scan_row, buy_eff=buy_eff,
+        note="; ".join(notes) if notes else None,
     )
     return result, value
 

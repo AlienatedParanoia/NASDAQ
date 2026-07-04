@@ -98,6 +98,10 @@ class InvestmentsPanel(QWidget):
         self._worker: InvestmentsWorker | None = None
         self._dirty = False
         self._pending: set[str] = set()  # tickers never yet validated; unsaved
+        # bumped on every mutation; reports computed under an older generation
+        # are discarded so a mid-flight Sell/Remove never renders mixed state
+        self._generation = 0
+        self._running_gen = -1
 
         today = QDate.currentDate()
 
@@ -193,6 +197,7 @@ class InvestmentsPanel(QWidget):
             self._render_empty()
             return
         self._status.setText("Valuing investments…")
+        self._running_gen = self._generation
         self._worker = InvestmentsWorker(list(self._lots))
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -250,6 +255,7 @@ class InvestmentsPanel(QWidget):
         already_validated = any(
             l.ticker == ticker and l.ticker not in self._pending for l in self._lots
         )
+        self._generation += 1
         self._lots.append(lot)
         if not already_validated:
             self._pending.add(ticker)  # saved only once a report validates it
@@ -259,6 +265,7 @@ class InvestmentsPanel(QWidget):
         self.recompute()
 
     def _on_remove(self, lot: Lot) -> None:
+        self._generation += 1
         self._lots = [l for l in self._lots if l is not lot]
         if not any(l.ticker == lot.ticker for l in self._lots):
             self._pending.discard(lot.ticker)
@@ -277,6 +284,7 @@ class InvestmentsPanel(QWidget):
         )
         if not ok:
             return
+        self._generation += 1
         lot.money_out = float(proceeds)
         lot.sell_date = date.today().isoformat()
         self._persist()
@@ -286,6 +294,13 @@ class InvestmentsPanel(QWidget):
 
     def _on_report(self, report: InvestmentReport) -> None:
         self._teardown()
+        if self._running_gen != self._generation:
+            # lots changed while this report was computing; discard it — the
+            # mutation already queued a fresh recompute via the dirty flag
+            if self._dirty:
+                self._dirty = False
+                self.recompute()
+            return
         rejected: list[tuple[str, str]] = []
         for pending in sorted(self._pending):
             results = [r for r in report.results if r.lot.ticker == pending]
@@ -379,6 +394,9 @@ class InvestmentsPanel(QWidget):
                 sell_btn.clicked.connect(lambda _c, l=lot: self._on_sell(l))
                 self._table.setCellWidget(i, 10, sell_btn)
             else:
+                # setItem alone never removes an existing cell widget — a
+                # leftover Sell button would silently rewrite recorded sales
+                self._table.removeCellWidget(i, 10)
                 self._set_item(i, 10, "")
             remove_btn = QPushButton("Remove")
             remove_btn.clicked.connect(lambda _c, l=lot: self._on_remove(l))

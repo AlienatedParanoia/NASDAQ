@@ -17,22 +17,28 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def backup_file(path: Path) -> None:
+    """Move a damaged file aside to a numbered .bak, never clobbering an
+    earlier — possibly good — backup. Callers MUST do this before any code
+    path that would overwrite the file, or user data is silently lost."""
+    try:
+        backup = path.with_suffix(path.suffix + ".bak")
+        n = 1
+        while backup.exists():
+            backup = path.with_suffix(f"{path.suffix}.bak{n}")
+            n += 1
+        path.replace(backup)
+    except OSError:
+        pass
+
+
 def read_json_or_backup(path: Path) -> dict | None:
-    """Parse JSON; on corruption move the file aside to a numbered .bak
-    (never clobbering an earlier — possibly good — backup) and return None."""
+    """Parse JSON; on corruption back the file up and return None."""
     if not path.exists():
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         log.exception("%s unreadable; starting empty (backup kept)", path.name)
-        try:
-            backup = path.with_suffix(path.suffix + ".bak")
-            n = 1
-            while backup.exists():
-                backup = path.with_suffix(f"{path.suffix}.bak{n}")
-                n += 1
-            path.replace(backup)
-        except OSError:
-            pass
+        backup_file(path)
         return None

@@ -334,7 +334,7 @@ class MainWindow(QMainWindow):
         # data is cached, so re-analyzing under the new window is seconds
         if self._thread is None and self._has_scanned:
             self._start_scan()
-        self._portfolio.recompute()
+        self._portfolio.window_changed()
 
     def _on_bucket_filter(self, index: int) -> None:
         self._proxy.set_bucket_filter(None if index == 0 else self._bucket_box.currentText())

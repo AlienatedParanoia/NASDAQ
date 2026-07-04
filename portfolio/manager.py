@@ -24,7 +24,7 @@ import pandas as pd
 import paths
 from classifier.classify import Bucket
 from data.fetcher import DataFetcher, FetchError
-from portfolio.storage import read_json_or_backup, write_json_atomic
+from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
 from signals.signal_generator import ScanRow, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
 
@@ -73,7 +73,10 @@ def load_portfolio(path: Path | None = None) -> list[Holding]:
             if float(h["amount"]) > 0
         ]
     except Exception:
+        # structurally wrong but valid JSON: back it up too, or the next
+        # save silently overwrites the user's data
         log.exception("portfolio file has unexpected structure; starting empty")
+        backup_file(path)
         return []
 
 

@@ -114,6 +114,10 @@ class PortfolioPanel(QWidget):
         self._dirty = False
         # tickers added but not yet validated by a worker report; never saved
         self._pending: set[str] = set()
+        # bumped on every mutation; reports computed under an older generation
+        # are discarded so mid-flight edits never render mixed state
+        self._generation = 0
+        self._running_gen = -1
 
         # -- add-holding row
         self._ticker_edit = QLineEdit()
@@ -183,6 +187,11 @@ class PortfolioPanel(QWidget):
 
     # ------------------------------------------------------------ lifecycle
 
+    def window_changed(self) -> None:
+        """Backtest window switched: any in-flight report is now stale."""
+        self._generation += 1
+        self.recompute()
+
     def recompute(self) -> None:
         if self._thread is not None:
             self._dirty = True
@@ -192,6 +201,7 @@ class PortfolioPanel(QWidget):
             self._render_empty()
             return
         self._status.setText("Computing portfolio…")
+        self._running_gen = self._generation
         self._worker = PortfolioWorker(list(self._holdings), self._window_years())
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -233,6 +243,7 @@ class PortfolioPanel(QWidget):
             return
         amount = float(self._amount_spin.value())
         strategy = self._strategy_combo.currentData()
+        self._generation += 1
         existing = next((h for h in self._holdings if h.ticker == ticker), None)
         if existing is not None:
             existing.amount += amount
@@ -245,12 +256,14 @@ class PortfolioPanel(QWidget):
         self.recompute()
 
     def _on_remove(self, ticker: str) -> None:
+        self._generation += 1
         self._holdings = [h for h in self._holdings if h.ticker != ticker]
         self._pending.discard(ticker)
         self._persist()
         self.recompute()
 
     def _on_row_strategy_changed(self, ticker: str, combo: QComboBox) -> None:
+        self._generation += 1
         value = combo.currentData()
         for h in self._holdings:
             if h.ticker == ticker:
@@ -262,6 +275,12 @@ class PortfolioPanel(QWidget):
 
     def _on_report(self, report: PortfolioReport) -> None:
         self._teardown()
+        if self._running_gen != self._generation:
+            # holdings changed while this report was computing; discard it
+            if self._dirty:
+                self._dirty = False
+                self.recompute()
+            return
         rejected: list[tuple[str, str]] = []
         for pending in sorted(self._pending):
             res = next(
