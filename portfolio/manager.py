@@ -13,7 +13,6 @@ the risk numbers.
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +24,7 @@ import pandas as pd
 import paths
 from classifier.classify import Bucket
 from data.fetcher import DataFetcher, FetchError
+from portfolio.storage import read_json_or_backup, write_json_atomic
 from signals.signal_generator import ScanRow, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
 
@@ -34,6 +34,15 @@ PORTFOLIO_VERSION = 1
 MIN_JOINT_BARS = 60  # below this, joint metrics are flagged unreliable
 
 _RISK_CUTS = ((0.15, "Low"), (0.25, "Moderate"), (0.40, "High"))
+
+# error fragments that mean "network hiccup", not "bad symbol" — used by the
+# UI panels to decide whether a failed new ticker should be rejected
+_TRANSIENT_MARKERS = ("cooldown", "cancelled", "rate limit", "timed out", "curl")
+
+
+def looks_transient(error: str) -> bool:
+    e = error.lower()
+    return any(marker in e for marker in _TRANSIENT_MARKERS)
 
 
 def risk_label(ann_vol: float) -> str:
@@ -54,42 +63,29 @@ class Holding:
 
 def load_portfolio(path: Path | None = None) -> list[Holding]:
     path = path or paths.portfolio_path()
-    if not path.exists():
+    raw = read_json_or_backup(path)
+    if raw is None:
         return []
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
         return [
             Holding(str(h["ticker"]).upper(), float(h["amount"]), h.get("strategy"))
             for h in raw["holdings"]
             if float(h["amount"]) > 0
         ]
     except Exception:
-        log.exception("portfolio file unreadable; starting empty (backup kept)")
-        try:
-            backup = path.with_suffix(".json.bak")
-            n = 1
-            while backup.exists():  # never clobber an earlier (maybe good) backup
-                backup = path.with_suffix(f".json.bak{n}")
-                n += 1
-            path.replace(backup)
-        except OSError:
-            pass
+        log.exception("portfolio file has unexpected structure; starting empty")
         return []
 
 
 def save_portfolio(holdings: Sequence[Holding], path: Path | None = None) -> None:
     path = path or paths.portfolio_path()
-    payload = {
+    write_json_atomic(path, {
         "version": PORTFOLIO_VERSION,
         "holdings": [
             {"ticker": h.ticker, "amount": h.amount, "strategy": h.strategy}
             for h in holdings
         ],
-    }
-    # atomic replace: a crash mid-write must never leave a truncated file
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    })
 
 
 # ---------------------------------------------------------------- analysis

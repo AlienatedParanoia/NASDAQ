@@ -38,6 +38,7 @@ from portfolio.manager import (
     PortfolioReport,
     analyze_portfolio,
     load_portfolio,
+    looks_transient,
     save_portfolio,
 )
 from signals.signal_generator import Signal
@@ -64,15 +65,6 @@ DISCLAIMER = (
     "Paper portfolio — numbers are a historical backtest over the selected "
     "window, not live P&L. No costs/slippage; past performance guarantees nothing."
 )
-
-# error fragments that mean "network hiccup", not "bad symbol" — a new ticker
-# failing this way stays pending instead of being rejected
-_TRANSIENT_MARKERS = ("cooldown", "cancelled", "rate limit", "timed out", "curl")
-
-
-def _looks_transient(error: str) -> bool:
-    e = error.lower()
-    return any(marker in e for marker in _TRANSIENT_MARKERS)
 
 
 def _money(v: float) -> str:
@@ -281,7 +273,7 @@ class PortfolioPanel(QWidget):
                 continue
             if res.error is None:
                 self._pending.discard(pending)
-            elif _looks_transient(res.error):
+            elif looks_transient(res.error):
                 # can't tell a bad symbol from a network hiccup; keep it
                 # pending (and unsaved) so a later recompute decides
                 self._status.setText(

@@ -59,12 +59,31 @@ cache resets). It is a paper portfolio: historical backtest numbers, not live
 P&L, with the usual caveats (no costs/slippage, survivorship-flattered
 long windows).
 
+## My Investments (real positions)
+
+The third tab records what you **actually** did: any Yahoo ticker, how much
+you put in, the buy date (backfillable years into the past), and — once sold
+— how much you got out and when. Open positions are valued live (shares
+derived from your amount at the buy-date close × latest close); sold
+positions use **your entered proceeds as the truth for P&L** (they include
+your real fills and fees), with market data supplying only the risk stats.
+
+Per lot you get worth/proceeds, P&L, return, annualized return (holdings
+under 30 days aren't annualized — that would be noise), risk (annualized
+volatility over your actual holding window), max drawdown, and the current
+signal for open lots. The overall strip is computed from your portfolio's
+genuine day-by-day value curve — cash before each buy, market value while
+held, proceeds afterwards — so total P&L equals the sum of per-lot P&Ls
+exactly while risk/Sharpe/drawdown reflect the real combined history.
+Stored in `investments.json` (atomic writes, corruption-safe backups).
+
 ## Tests
 
 Each build phase has a runnable check under `tests/` (run from the repo root
 with `python -m tests.<name>`): `phase1_data_check`, `phase2_indicator_check`,
 `phase2_universe_check`, `phase3_backtest_check`, `phase4_signal_check`,
-`phase5_ui_smoke`, `phase6_portfolio_check`, and `regression_review_fixes`.
+`phase5_ui_smoke`, `phase6_portfolio_check`, `phase7_investments_check`, and
+`regression_review_fixes`.
 
 ## Build the Windows exe
 

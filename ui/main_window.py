@@ -43,6 +43,7 @@ from data.fetcher import DataFetcher
 from data.universe import get_universe
 from signals.signal_generator import ScanRow, Signal, scan_universe
 from ui.detail_panel import DetailPanel
+from ui.investments_panel import InvestmentsPanel
 from ui.portfolio_panel import PortfolioPanel
 
 log = logging.getLogger(__name__)
@@ -265,9 +266,11 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
 
         self._portfolio = PortfolioPanel(lambda: self._window_box.currentData())
+        self._investments = InvestmentsPanel()
         tabs = QTabWidget()
         tabs.addTab(splitter, "Scanner")
         tabs.addTab(self._portfolio, "Portfolio")
+        tabs.addTab(self._investments, "My Investments")
         self.setCentralWidget(tabs)
 
         self._thread: QThread | None = None
@@ -344,6 +347,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._portfolio.shutdown()
+        self._investments.shutdown()
         if self._worker is not None:
             self._worker.stop()
         if self._thread is not None:

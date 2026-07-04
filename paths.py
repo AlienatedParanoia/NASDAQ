@@ -39,6 +39,10 @@ def portfolio_path() -> Path:
     return data_dir() / "portfolio.json"
 
 
+def investments_path() -> Path:
+    return data_dir() / "investments.json"
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """File logging always (a --windowed exe has no stderr), console in dev."""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")

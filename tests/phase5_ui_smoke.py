@@ -19,9 +19,10 @@ from data.fetcher import configure_yfinance  # noqa: E402
 SUBSET = ["AAPL", "MSFT", "NVDA", "KHC", "PEP", "TSLA", "PLTR", "XEL"]
 NEG_INF = float("-inf")
 
-# isolate the smoke test's portfolio from the user's real portfolio.json
+# isolate the smoke test's user data from the real portfolio/investments files
 _TMP_PORTFOLIO_DIR = tempfile.mkdtemp()
 paths.portfolio_path = lambda: Path(_TMP_PORTFOLIO_DIR) / "portfolio.json"
+paths.investments_path = lambda: Path(_TMP_PORTFOLIO_DIR) / "investments.json"
 
 
 def _wait_portfolio_idle(app, panel, timeout: float = 180.0) -> None:
@@ -168,6 +169,59 @@ def main() -> None:
     saved_tickers = {h["ticker"] for h in saved["holdings"]}
     assert "ZZFAKE99" not in saved_tickers, saved_tickers
     print("mid-flight add race: bogus ticker neither kept nor persisted")
+
+    # ---- my investments tab ----
+    import ui.investments_panel as ip
+    from PyQt6.QtCore import QDate
+
+    ip.QMessageBox = type("MB", (), {"warning": staticmethod(lambda *a, **k: None)})
+    tabs.setCurrentIndex(2)
+    inv = win._investments
+    assert inv._table.rowCount() == 0
+    inv._ticker_edit.setText("AAPL")
+    inv._in_spin.setValue(1000)
+    inv._buy_date.setDate(QDate.currentDate().addYears(-1))
+    inv._on_add()
+    _wait_portfolio_idle(app, inv)
+    inv._ticker_edit.setText("MSFT")
+    inv._in_spin.setValue(1500)
+    inv._buy_date.setDate(QDate.currentDate().addYears(-1))
+    inv._sold_check.setChecked(True)
+    inv._out_spin.setValue(2000)
+    inv._on_add()
+    _wait_portfolio_idle(app, inv)
+    assert inv._table.rowCount() == 2, inv._table.rowCount()
+    inv_summary = inv._summary.text()
+    assert "Put in $2,500" in inv_summary and "since" in inv_summary, inv_summary
+    msft = next(r for r in inv._report.results if r.lot.ticker == "MSFT")
+    assert abs(msft.pnl - 500.0) < 1e-9, msft.pnl
+    print(f"investments summary OK: {inv_summary[:110]}…")
+
+    # sell flow on the open AAPL lot
+    ip.QInputDialog = type(
+        "QID", (), {"getDouble": staticmethod(lambda *a, **k: (1750.0, True))}
+    )
+    aapl_lot = next(l for l in inv._lots if l.ticker == "AAPL")
+    inv._on_sell(aapl_lot)
+    _wait_portfolio_idle(app, inv)
+    assert aapl_lot.money_out == 1750.0 and aapl_lot.sell_date
+    aapl_res = next(r for r in inv._report.results if r.lot.ticker == "AAPL")
+    assert abs(aapl_res.pnl - 750.0) < 1e-9
+    print("sell flow OK: AAPL closed at entered proceeds")
+
+    # bogus ticker never persisted
+    inv._sold_check.setChecked(False)
+    inv._ticker_edit.setText("QQFAKE55")
+    inv._in_spin.setValue(500)
+    inv._on_add()
+    for _ in range(4):
+        _wait_portfolio_idle(app, inv)
+        if inv._thread is None and not inv._dirty and not inv._pending:
+            break
+    assert "QQFAKE55" not in {l.ticker for l in inv._lots}
+    inv_saved = _json.loads(paths.investments_path().read_text(encoding="utf-8"))
+    assert "QQFAKE55" not in {l["ticker"] for l in inv_saved["lots"]}
+    print("investments bogus-ticker rejection OK")
     tabs.setCurrentIndex(0)
 
     shot = paths.data_dir() / "ui_smoke.png"
