@@ -1,0 +1,7 @@
+yfinance==1.5.1
+curl_cffi>=0.15,<1.0
+pandas>=2.0,<3.0
+numpy>=1.26
+PyQt6>=6.6
+pyqtgraph>=0.13.4
+platformdirs>=4.0

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/cache.db
+data/cache.db-wal
+data/cache.db-shm
+data/yf_tz/
+*.log
+build/
+dist/
