@@ -5,6 +5,7 @@ data/cache.db
 data/cache.db-wal
 data/cache.db-shm
 data/yf_tz/
+data/ui_smoke.png
 *.log
 build/
 dist/
