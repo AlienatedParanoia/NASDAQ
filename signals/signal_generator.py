@@ -42,9 +42,11 @@ class ScanRow:
     bucket: Bucket
     signal: Signal | None            # None for Unclassified or errors
     total_return: float | None
+    cagr: float | None               # annualized, comparable across listing ages
     sharpe: float | None
     max_dd: float | None
     bh_return: float | None
+    bh_cagr: float | None
     reasoning: str
     prices: pd.DataFrame | None = None
     trades: list[Trade] = field(default_factory=list)
@@ -56,10 +58,26 @@ def _quality(bt: BacktestResult) -> bool:
     return bt.sharpe >= MIN_SHARPE and bt.total_return > MIN_RETURN
 
 
+EXIT_CUES = {
+    Bucket.TREND: (
+        "Exit cue: EMA20 closing back below EMA50 "
+        "(the signal flips to Avoid on a later scan)."
+    ),
+    Bucket.MEAN_REVERSION: (
+        "Exit cue: close reaching the middle band, RSI >= 55, or 15 trading "
+        "days held — whichever comes first."
+    ),
+    Bucket.LONG_TERM: (
+        "Exit cue: fundamentals score decaying below 45 on a future scan."
+    ),
+}
+
+
 def _bt_text(bt: BacktestResult) -> str:
     s = (
-        f"Backtest 2y: {bt.total_return:+.1%} vs buy-and-hold "
-        f"{bt.bh_total_return:+.1%}, Sharpe {bt.sharpe:.2f}, "
+        f"Backtest {bt.years:.1f}y: {bt.total_return:+.0%} total "
+        f"({bt.cagr:+.1%}/yr) vs buy-and-hold {bt.bh_total_return:+.0%} "
+        f"({bt.bh_cagr:+.1%}/yr), Sharpe {bt.sharpe:.2f}, "
         f"MaxDD {bt.max_drawdown:.1%}, {bt.n_trades} trades."
     )
     if bt.sharpe > SHARPE_BUG_TRIPWIRE:
@@ -74,9 +92,11 @@ def _row(data: StockData, bucket: Bucket, signal: Signal | None, bt: BacktestRes
         bucket=bucket,
         signal=signal,
         total_return=bt.total_return,
+        cagr=bt.cagr,
         sharpe=bt.sharpe,
         max_dd=bt.max_drawdown,
         bh_return=bt.bh_total_return,
+        bh_cagr=bt.bh_cagr,
         reasoning=reasoning,
         prices=data.prices,
         trades=bt.trades,
@@ -103,7 +123,7 @@ def _trend_row(data: StockData, rule_trace: str) -> ScanRow:
         )
     reasoning = (
         f"TREND bucket ({rule_trace}). {now_txt}. {_bt_text(bt)} "
-        f"Signal: {signal.value.upper()}."
+        f"Signal: {signal.value.upper()}. {EXIT_CUES[Bucket.TREND]}"
     )
     return _row(data, Bucket.TREND, signal, bt, reasoning, strat.overlays(px))
 
@@ -136,7 +156,7 @@ def _mean_reversion_row(data: StockData, rule_trace: str) -> ScanRow:
         )
     reasoning = (
         f"MEAN-REVERSION bucket ({rule_trace}). Currently {now_txt}. {_bt_text(bt)} "
-        f"Signal: {signal.value.upper()}."
+        f"Signal: {signal.value.upper()}. {EXIT_CUES[Bucket.MEAN_REVERSION]}"
     )
     return _row(data, Bucket.MEAN_REVERSION, signal, bt, reasoning, strat.overlays(px))
 
@@ -179,12 +199,25 @@ def _long_term_row(data: StockData, rule_trace: str) -> ScanRow:
             )
     reasoning = (
         f"LONG-TERM bucket ({rule_trace}). {score_txt}. "
-        f"Strategy is buy-and-hold. {_bt_text(bt)} Signal: {signal.value.upper()}."
+        f"Strategy is buy-and-hold. {_bt_text(bt)} Signal: {signal.value.upper()}. "
+        f"{EXIT_CUES[Bucket.LONG_TERM]}"
     )
     return _row(data, Bucket.LONG_TERM, signal, bt, reasoning, strat.overlays(px))
 
 
-def generate_signal(data: StockData) -> ScanRow:
+def generate_signal(data: StockData, window_years: int = 10) -> ScanRow:
+    """Analyze one stock over the trailing `window_years`. The cache always
+    holds the full fetch span; the slice here controls the backtest, the
+    chart, and the markers together. Classifier metrics are trailing-window
+    latest values, so the bucket is identical for any window >= 2 years."""
+    if window_years > 0 and len(data.prices):
+        cutoff = data.prices.index[-1] - pd.DateOffset(years=window_years)
+        data = StockData(
+            ticker=data.ticker,
+            prices=data.prices.loc[data.prices.index >= cutoff],
+            fundamentals=data.fundamentals,
+            stale=data.stale,
+        )
     bucket, rule_trace = classify(compute_metrics(data))
     if bucket is Bucket.TREND:
         row = _trend_row(data, rule_trace)
@@ -198,9 +231,11 @@ def generate_signal(data: StockData) -> ScanRow:
             bucket=Bucket.UNCLASSIFIED,
             signal=None,
             total_return=None,
+            cagr=None,
             sharpe=None,
             max_dd=None,
             bh_return=None,
+            bh_cagr=None,
             reasoning=f"UNCLASSIFIED: {rule_trace}. No forced signal for this stock.",
             prices=data.prices,
             overlay={"SMA200": ind.sma(data.prices["close"], 200)},
@@ -216,6 +251,7 @@ def scan_universe(
     progress: Callable[[int, int, str], None] | None = None,
     row_ready: Callable[[ScanRow], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    window_years: int = 10,
 ) -> list[ScanRow]:
     """Runs the full pipeline per ticker. Every per-ticker failure is caught,
     logged, and turned into an error row — one bad ticker never kills a scan."""
@@ -228,19 +264,21 @@ def scan_universe(
         if progress is not None:
             progress(i, n, ticker)
         try:
-            row = generate_signal(fetcher.get_stock(ticker))
+            row = generate_signal(fetcher.get_stock(ticker), window_years)
         except FetchError as e:
             log.warning("%s skipped: %s", ticker, e)
             row = ScanRow(
                 ticker=ticker, bucket=Bucket.UNCLASSIFIED, signal=None,
-                total_return=None, sharpe=None, max_dd=None, bh_return=None,
+                total_return=None, cagr=None, sharpe=None, max_dd=None,
+                bh_return=None, bh_cagr=None,
                 reasoning=f"Skipped: {e}", error=str(e),
             )
         except Exception as e:  # noqa: BLE001 — the scan must survive anything
             log.exception("%s: unexpected error during scan", ticker)
             row = ScanRow(
                 ticker=ticker, bucket=Bucket.UNCLASSIFIED, signal=None,
-                total_return=None, sharpe=None, max_dd=None, bh_return=None,
+                total_return=None, cagr=None, sharpe=None, max_dd=None,
+                bh_return=None, bh_cagr=None,
                 reasoning=f"Error while analyzing: {e}", error=str(e),
             )
         rows.append(row)

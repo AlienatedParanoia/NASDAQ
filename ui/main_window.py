@@ -45,7 +45,9 @@ from ui.detail_panel import DetailPanel
 
 log = logging.getLogger(__name__)
 
-COLUMNS = ("Ticker", "Bucket", "Signal", "Return", "Sharpe", "Max DD")
+COLUMNS = ("Ticker", "Bucket", "Signal", "Ret/yr", "Sharpe", "Max DD")
+
+WINDOW_CHOICES = (("10 years", 10), ("5 years", 5), ("2 years", 2))
 
 SIGNAL_COLORS = {
     Signal.BUY: QColor("#1e8e3e"),
@@ -111,7 +113,7 @@ class ScanTableModel(QAbstractTableModel):
         if col == 2:
             return str(r.signal) if r.signal else ("skipped" if r.error else "—")
         if col == 3:
-            return f"{r.total_return:+.1%}" if r.total_return is not None else "—"
+            return f"{r.cagr:+.1%}" if r.cagr is not None else "—"
         if col == 4:
             return f"{r.sharpe:.2f}" if r.sharpe is not None else "—"
         if col == 5:
@@ -126,7 +128,7 @@ class ScanTableModel(QAbstractTableModel):
             return str(r.bucket)
         if col == 2:
             return str(r.signal) if r.signal else ""
-        value = (r.total_return, r.sharpe, r.max_dd)[col - 3]
+        value = (r.cagr, r.sharpe, r.max_dd)[col - 3]
         return value if value is not None else float("-inf")
 
 
@@ -163,9 +165,10 @@ class ScanWorker(QObject):
     finished = pyqtSignal(list)
     failed = pyqtSignal(str)
 
-    def __init__(self, tickers: list[str]) -> None:
+    def __init__(self, tickers: list[str], window_years: int) -> None:
         super().__init__()
         self._tickers = tickers
+        self._window_years = window_years
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -181,6 +184,7 @@ class ScanWorker(QObject):
                     progress=self.progress.emit,
                     row_ready=self.row_ready.emit,
                     should_stop=self._stop.is_set,
+                    window_years=self._window_years,
                 )
             finally:
                 fetcher.close()
@@ -212,6 +216,15 @@ class MainWindow(QMainWindow):
         self._scan_btn = QPushButton("Scan")
         self._scan_btn.clicked.connect(self._start_scan)
 
+        self._window_box = QComboBox()
+        for label, years in WINDOW_CHOICES:
+            self._window_box.addItem(label, years)
+        self._window_box.setToolTip(
+            "Backtest window. Data is cached at 10 years; switching re-analyzes "
+            "instantly without refetching."
+        )
+        self._window_box.currentIndexChanged.connect(self._on_window_changed)
+
         self._bucket_box = QComboBox()
         self._bucket_box.addItem("All buckets")
         for b in Bucket:
@@ -224,6 +237,7 @@ class MainWindow(QMainWindow):
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(self._scan_btn)
+        toolbar.addWidget(self._window_box)
         toolbar.addWidget(self._bucket_box)
         toolbar.addWidget(self._filter_edit, 1)
 
@@ -251,6 +265,7 @@ class MainWindow(QMainWindow):
 
         self._thread: QThread | None = None
         self._worker: ScanWorker | None = None
+        self._has_scanned = False
 
     # scan lifecycle ---------------------------------------------------------
     def _start_scan(self) -> None:
@@ -265,7 +280,7 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self._status.setText("Starting scan…")
 
-        self._worker = ScanWorker(universe)
+        self._worker = ScanWorker(universe, self._window_box.currentData())
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -292,6 +307,7 @@ class MainWindow(QMainWindow):
         self._model.append_row(row)
 
     def _on_finished(self, rows: list) -> None:
+        self._has_scanned = True
         skipped = [r.ticker for r in rows if r.error]
         msg = f"{len(rows) - len(skipped)} stocks scanned"
         if skipped:
@@ -304,6 +320,11 @@ class MainWindow(QMainWindow):
         self._teardown_thread()
 
     # filters + selection ----------------------------------------------------
+    def _on_window_changed(self, _index: int) -> None:
+        # data is cached, so re-analyzing under the new window is seconds
+        if self._thread is None and self._has_scanned:
+            self._start_scan()
+
     def _on_bucket_filter(self, index: int) -> None:
         self._proxy.set_bucket_filter(None if index == 0 else self._bucket_box.currentText())
 

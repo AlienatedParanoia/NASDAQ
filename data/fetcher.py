@@ -1,7 +1,7 @@
 """yfinance wrapper with a SQLite cache.
 
-Prices: two years of daily OHLCV per ticker (auto-adjusted close, so dividends
-are folded in). Fundamentals: the valuation/growth/balance-sheet snapshot the
+Prices: up to ten years of daily OHLCV per ticker (auto-adjusted close, so
+dividends are folded in); younger listings get whatever history exists. Fundamentals: the valuation/growth/balance-sheet snapshot the
 classifier and long-term scorer need. Both are cached in SQLite and refreshed
 only when the cached copy is more than a day old.
 
@@ -31,9 +31,11 @@ from yfinance.exceptions import YFRateLimitError
 log = logging.getLogger(__name__)
 
 PRICE_COLUMNS = ("open", "high", "low", "close", "volume")
+PRICE_PERIOD = "10y"
 MAX_AGE = timedelta(days=1)
 RATE_LIMIT_BACKOFF_S = 60.0
 RATE_LIMIT_COOLDOWN_S = 300.0  # after a failed retry, fail fast this long
+CACHE_VERSION = 2  # bump when the schema or fetch span changes; wipes the cache
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
@@ -132,6 +134,15 @@ class DataFetcher:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != CACHE_VERSION:
+            log.info("cache version %s -> %s: resetting cache", version, CACHE_VERSION)
+            self._conn.executescript(
+                "DROP TABLE IF EXISTS prices;"
+                "DROP TABLE IF EXISTS fundamentals;"
+                "DROP TABLE IF EXISTS fetch_meta;"
+            )
+            self._conn.execute(f"PRAGMA user_version = {CACHE_VERSION}")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
@@ -277,7 +288,7 @@ class DataFetcher:
     def _fetch_prices(self, ticker: str) -> pd.DataFrame:
         df = self._network_call(
             lambda: yf.Ticker(ticker).history(
-                period="2y", interval="1d", auto_adjust=True
+                period=PRICE_PERIOD, interval="1d", auto_adjust=True
             )
         )
         if df is None or df.empty:

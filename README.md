@@ -2,11 +2,16 @@
 
 Desktop app that scans the NASDAQ-100, classifies each stock into a strategy
 bucket (Long-term hold / Trend / Mean-reversion), backtests the assigned
-strategy over 2 years of daily data, and shows a Buy/Hold/Avoid signal with
-plain-English reasoning.
+strategy over up to 10 years of daily data (window selectable in the toolbar:
+2 / 5 / 10 years — switching re-analyzes instantly from cache), and shows a
+Buy/Hold/Avoid signal with plain-English reasoning. The table's Ret/yr column
+is annualized (CAGR) so stocks with different listing ages are comparable;
+total return and the actual span covered appear in the reasoning text.
 
 **Signals are informational only.** Backtests assume no transaction costs or
-slippage, fills at daily closes, and use ~15-minute-delayed Yahoo Finance data.
+slippage, fills at daily closes, and use ~15-minute-delayed Yahoo Finance
+data. Long windows also carry survivorship bias: the universe is *today's*
+index members — the winners — so historical returns read flattering.
 
 ## Run from source
 
@@ -28,10 +33,11 @@ once a day, so later scans take seconds.
    Mean-reversion — ADX < 20 and vol > 25%. Otherwise Unclassified, no signal.
 2. **Backtest** the bucket's strategy: EMA(20/50) crossover, RSI(14) + Bollinger
    bounce, or buy-and-hold scored by a 0–100 fundamentals composite — always
-   benchmarked against buy-and-hold on the identical window.
+   benchmarked against buy-and-hold on the identical window. Stocks listed
+   less than 10 years ago simply use whatever history exists.
 3. **Signal** from the latest indicator state, gated by backtest quality
    (Sharpe ≥ 0.5 and positive return), with the reasoning string citing the
-   actual numbers.
+   actual numbers and ending with the strategy's exit cue.
 
 ## Tests
 

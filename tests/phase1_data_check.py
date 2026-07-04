@@ -30,7 +30,7 @@ def main() -> None:
     for t in TICKERS:
         sd = fetcher.get_stock(t)
         n = len(sd.prices)
-        assert 400 <= n <= 520, f"{t}: unexpected row count {n} (expected ~502 for 2y)"
+        assert 2400 <= n <= 2600, f"{t}: unexpected row count {n} (expected ~2515 for 10y)"
         assert (sd.prices["close"] > 0).all(), f"{t}: non-positive closes"
         assert sd.prices.index.is_monotonic_increasing, f"{t}: index not ascending"
         assert sd.prices.index.tz is None, f"{t}: index still tz-aware"

@@ -40,12 +40,15 @@ class BacktestResult:
     positions: pd.Series             # 0/1 over the evaluation window
     equity: pd.Series
     trades: list[Trade]
+    years: float                     # evaluation window span in trading years
+    cagr: float                      # annualized total_return over that span
+    bh_cagr: float
 
 
-def _perf(returns: pd.Series) -> tuple[float, float, float, pd.Series]:
+def _perf(returns: pd.Series) -> tuple[float, float, float, float, pd.Series]:
     equity = (1.0 + returns).cumprod()
     if len(equity) == 0:
-        return 0.0, 0.0, 0.0, equity
+        return 0.0, 0.0, 0.0, 0.0, equity
     total = float(equity.iloc[-1] - 1.0)
     std = returns.std(ddof=1)
     sharpe = 0.0
@@ -55,7 +58,9 @@ def _perf(returns: pd.Series) -> tuple[float, float, float, pd.Series]:
     # with a decline understates its drawdown by the first bar's loss
     peak = equity.cummax().clip(lower=1.0)
     drawdown = float(min((equity / peak - 1.0).min(), 0.0))
-    return total, sharpe, drawdown, equity
+    years = len(returns) / TRADING_DAYS
+    cagr = float((1.0 + total) ** (1.0 / years) - 1.0) if years > 0 else 0.0
+    return total, sharpe, drawdown, cagr, equity
 
 
 def _extract_trades(close: pd.Series, pos: pd.Series) -> list[Trade]:
@@ -91,7 +96,12 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
     window = pos.dropna().index
     if len(window) < 2:
         empty = pd.Series(dtype=float)
-        return BacktestResult(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, pos.dropna(), empty, [])
+        return BacktestResult(
+            total_return=0.0, sharpe=0.0, max_drawdown=0.0,
+            bh_total_return=0.0, bh_sharpe=0.0, bh_max_drawdown=0.0,
+            n_trades=0, positions=pos.dropna(), equity=empty, trades=[],
+            years=0.0, cagr=0.0, bh_cagr=0.0,
+        )
 
     pos = pos.loc[window].astype(float)
     if not pos.isin([0.0, 1.0]).all():
@@ -101,8 +111,8 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
     r = close_w.pct_change().iloc[1:]
     strat_returns = pos.iloc[1:] * r
 
-    total, sharpe, dd, equity = _perf(strat_returns)
-    bh_total, bh_sharpe, bh_dd, _ = _perf(r)
+    total, sharpe, dd, cagr, equity = _perf(strat_returns)
+    bh_total, bh_sharpe, bh_dd, bh_cagr, _ = _perf(r)
     trades = _extract_trades(close_w, pos)
 
     return BacktestResult(
@@ -116,4 +126,7 @@ def run_backtest(prices: pd.DataFrame, positions: pd.Series) -> BacktestResult:
         positions=pos,
         equity=equity,
         trades=trades,
+        years=len(r) / TRADING_DAYS,
+        cagr=cagr,
+        bh_cagr=bh_cagr,
     )

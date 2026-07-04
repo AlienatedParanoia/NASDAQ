@@ -32,6 +32,8 @@ def main() -> None:
     win = mw.MainWindow()
     win.show()
 
+    assert win._window_box.currentData() == 10, "default backtest window should be 10y"
+
     win._start_scan()
     assert not win._scan_btn.isEnabled(), "Scan button should disable during a scan"
     deadline = time.monotonic() + 180

@@ -68,6 +68,18 @@ def negative_peg_is_not_a_buy_signal() -> None:
     print(f"negative PEG composite {score_bad:.1f} < missing-PEG {score_missing:.1f}")
 
 
+def cagr_annualizes_correctly() -> None:
+    # +100% over exactly 504 return days (2 trading years) -> sqrt(2)-1 per year
+    daily = 2.0 ** (1.0 / 504)
+    closes = 100.0 * daily ** np.arange(505)
+    px = _df(closes)
+    bt = run_backtest(px, pd.Series(1.0, index=px.index))
+    assert abs(bt.total_return - 1.0) < 1e-6, bt.total_return
+    assert abs(bt.years - 2.0) < 1e-9, bt.years
+    assert abs(bt.cagr - (2.0 ** 0.5 - 1.0)) < 1e-6, bt.cagr
+    print(f"CAGR sanity: +100% over {bt.years:.1f}y -> {bt.cagr:+.2%}/yr")
+
+
 def backoff_interruptible_and_breaker_fails_fast() -> None:
     cancelled = DataFetcher(paths.db_path(), should_stop=lambda: True)
     t0 = time.perf_counter()
@@ -95,6 +107,7 @@ def main() -> None:
     trade_fills_reconcile()
     drawdown_includes_starting_capital()
     negative_peg_is_not_a_buy_signal()
+    cagr_annualizes_correctly()
     backoff_interruptible_and_breaker_fails_fast()
     print("REVIEW-FIX REGRESSION CHECKS PASSED")
 

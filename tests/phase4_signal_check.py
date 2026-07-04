@@ -37,7 +37,9 @@ def main() -> None:
             f"{r.ticker}: reasoning missing bucket name: {r.reasoning[:80]}"
         )
         assert "Sharpe" in r.reasoning, f"{r.ticker}: reasoning missing backtest stats"
+        assert "Exit cue:" in r.reasoning, f"{r.ticker}: reasoning missing exit cue"
         assert r.total_return is not None and r.sharpe is not None and r.max_dd is not None
+        assert r.cagr is not None, f"{r.ticker}: missing CAGR"
 
     dist = Counter(str(r.signal) for r in classified)
     print(f"\nsignal distribution over {len(classified)} classified: {dict(dist)}")
@@ -56,6 +58,25 @@ def main() -> None:
             print(f"\n  {r.ticker}: {r.reasoning}")
         if len(shown) == 3:
             break
+
+    # window slicing spot check: same cached data, different analysis windows
+    import re
+
+    from data.fetcher import DataFetcher as DF
+    from signals.signal_generator import generate_signal
+
+    f2 = DF(paths.db_path())
+    data = f2.get_stock("AAPL")
+    f2.close()
+    r10 = generate_signal(data, window_years=10)
+    r2 = generate_signal(data, window_years=2)
+    assert r2.prices is not None and r10.prices is not None
+    assert len(r2.prices) < len(r10.prices), "2y window should hold fewer bars than 10y"
+    m = re.search(r"Backtest (\d+\.\d)y", r2.reasoning)
+    assert m and 1.5 <= float(m.group(1)) <= 2.1, f"2y window span looks wrong: {r2.reasoning[:120]}"
+    assert r2.bucket == r10.bucket, "bucket must not depend on the window"
+    print(f"\nwindow slicing OK: 10y={len(r10.prices)} bars, 2y={len(r2.prices)} bars, "
+          f"2y span reported {m.group(1)}y")
 
     print("\nPHASE 4 CHECKS PASSED")
 
