@@ -6,6 +6,9 @@ data/cache.db-wal
 data/cache.db-shm
 data/yf_tz/
 data/ui_smoke.png
+# personal financial data written here when running from source (paths.data_dir())
+data/portfolio.json
+data/investments.json
 *.log
 build/
 dist/
