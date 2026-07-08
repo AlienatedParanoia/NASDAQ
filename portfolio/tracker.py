@@ -1,8 +1,8 @@
 """Real-money investment tracking: user-entered lots (money in / money out)
 valued against actual market history.
 
-Unlike the paper portfolio (a strategy backtest), this records what the user
-actually did. For sold lots the user's entered proceeds are the truth for
+This is the Portfolio tab's backend: it records what the user actually did,
+not a strategy backtest. For sold lots the user's entered proceeds are the truth for
 P&L — they include fees and real fills; market data supplies only the risk
 statistics. The overall view is the genuine portfolio value curve V(t): each
 lot contributes its cash before purchase, its market value while held, and
@@ -22,7 +22,6 @@ import pandas as pd
 
 import paths
 from data.fetcher import DataFetcher, FetchError, StockData
-from portfolio.manager import risk_label
 from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
 from signals.signal_generator import ScanRow, Signal, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
@@ -31,6 +30,24 @@ log = logging.getLogger(__name__)
 
 INVESTMENTS_VERSION = 1
 MIN_ANNUALIZE_DAYS = 30  # annualizing anything shorter is noise
+
+_RISK_CUTS = ((0.15, "Low"), (0.25, "Moderate"), (0.40, "High"))
+
+# error fragments that mean "network hiccup", not "bad symbol" — used by the
+# UI panel to decide whether a failed new ticker should be rejected
+_TRANSIENT_MARKERS = ("cooldown", "cancelled", "rate limit", "timed out", "curl")
+
+
+def looks_transient(error: str) -> bool:
+    e = error.lower()
+    return any(marker in e for marker in _TRANSIENT_MARKERS)
+
+
+def risk_label(ann_vol: float) -> str:
+    for cut, label in _RISK_CUTS:
+        if ann_vol < cut:
+            return label
+    return "Very high"
 
 
 @dataclass(slots=True)

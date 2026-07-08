@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from strategies.backtest_engine import time_base
+
 
 def sma(close: pd.Series, window: int) -> pd.Series:
     return close.rolling(window, min_periods=window).mean()
@@ -65,8 +67,17 @@ def adx_wilder(
 
 def annualized_vol(close: pd.Series, window: int = 200) -> pd.Series:
     """Rolling annualized volatility of daily returns, as a decimal fraction
-    (0.30 == 30%)."""
-    return close.pct_change().rolling(window, min_periods=window).std(ddof=1) * np.sqrt(252)
+    (0.30 == 30%).
+
+    Annualized with the series' own observed bars-per-year (via time_base)
+    rather than a hardcoded 252, so this matches the calendar-aware
+    annualization used by the backtest engine and portfolio math. For real
+    US-equity data (~252 trading days/yr) the factor is √252; a crypto or
+    foreign listing with a different calendar is scaled correctly instead of
+    understated — which matters because the classifier gates buckets on this
+    value."""
+    _, ppy = time_base(close)
+    return close.pct_change().rolling(window, min_periods=window).std(ddof=1) * np.sqrt(ppy)
 
 
 def crossover(a: pd.Series, b: pd.Series) -> pd.Series:

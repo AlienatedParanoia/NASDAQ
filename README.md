@@ -39,29 +39,28 @@ once a day, so later scans take seconds.
    (Sharpe ≥ 0.5 and positive return), with the reasoning string citing the
    actual numbers and ending with the strategy's exit cue.
 
-## Paper portfolio
+## Daily Report
 
-The Portfolio tab holds a persistent paper portfolio: add **any Yahoo ticker**
-with a dollar amount, and optionally pick the strategy per holding — by
-default each holding runs the classifier-recommended strategy, and switching
-the strategy re-runs that holding's verdict and returns under the new rules.
+The Daily Report tab produces an on-demand digest of the day's best
+opportunities. Click **Generate report** and it runs the same NASDAQ-100 scan
+as the Scanner (over the toolbar's selected 2/5/10-year window, off the daily
+cache), then ranks every stock with a current **Buy** signal and shows the
+top 5.
 
-What the numbers mean: each holding is backtested under its strategy over the
-selected 2/5/10-year window; holdings combine with **buy-and-hold dollar
-weighting** on the **common window** (limited by the youngest holding, which
-the summary names), so overall profit equals the sum of per-holding profits
-while risk/Sharpe/drawdown are measured on the combined day-by-day series —
-diversification between holdings genuinely lowers the risk number. Risk
-labels: Low < 15%/yr vol, Moderate < 25%, High < 40%, else Very high.
+Ranking is **risk-adjusted**: among that day's Buys, each of Sharpe, annualized
+return (CAGR), and max drawdown is normalized across the field and weighted
+**50% Sharpe / 30% CAGR / 20% shallower-drawdown**, so a name only reaches the
+top by pairing return with risk control. Rows the pipeline flags with an
+implausible Sharpe (over 3 — typically a freshly listed ticker with a couple of
+trades) are **excluded** from recommendations and the exclusion is noted in the
+report. The digest is dated, cites each pick's actual numbers and plain-English
+reasoning, and carries the standard informational-only disclaimer; clicking a
+pick opens its chart. It ranks the app's own backtest-derived signals — it is
+not a prediction or advice.
 
-The portfolio is stored in `portfolio.json` next to the cache (it survives
-cache resets). It is a paper portfolio: historical backtest numbers, not live
-P&L, with the usual caveats (no costs/slippage, survivorship-flattered
-long windows).
+## Portfolio (real positions)
 
-## My Investments (real positions)
-
-The third tab records what you **actually** did: any Yahoo ticker, how much
+The Portfolio tab records what you **actually** did: any Yahoo ticker, how much
 you put in, the buy date (backfillable years into the past), and — once sold
 — how much you got out and when. Open positions are valued live (shares
 derived from your amount at the buy-date close × latest close); sold
@@ -74,7 +73,8 @@ volatility over your actual holding window), max drawdown, and the current
 signal for open lots. The overall strip is computed from your portfolio's
 genuine day-by-day value curve — cash before each buy, market value while
 held, proceeds afterwards — so total P&L equals the sum of per-lot P&Ls
-exactly while risk/Sharpe/drawdown reflect the real combined history.
+exactly while risk/Sharpe/drawdown reflect the real combined history. Risk
+labels: Low < 15%/yr vol, Moderate < 25%, High < 40%, else Very high.
 Stored in `investments.json` (atomic writes, corruption-safe backups).
 
 ## Tests
@@ -82,8 +82,8 @@ Stored in `investments.json` (atomic writes, corruption-safe backups).
 Each build phase has a runnable check under `tests/` (run from the repo root
 with `python -m tests.<name>`): `phase1_data_check`, `phase2_indicator_check`,
 `phase2_universe_check`, `phase3_backtest_check`, `phase4_signal_check`,
-`phase5_ui_smoke`, `phase6_portfolio_check`, `phase7_investments_check`, and
-`regression_review_fixes`.
+`phase5_ui_smoke`, `phase7_investments_check`, `phase8_daily_report_check`,
+and `regression_review_fixes`.
 
 ## Build the Windows exe
 

@@ -35,16 +35,16 @@ from PyQt6.QtWidgets import (
 
 import paths
 from data.fetcher import DataFetcher
-from portfolio.manager import looks_transient
 from portfolio.tracker import (
     InvestmentReport,
     Lot,
     analyze_investments,
     load_investments,
+    looks_transient,
     save_investments,
 )
+from signals.signal_generator import Signal
 from ui.detail_panel import DetailPanel
-from ui.portfolio_panel import SIGNAL_COLORS, _money
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,17 @@ COLS = (
 
 GREEN = QColor("#1e8e3e")
 RED = QColor("#d93025")
+
+SIGNAL_COLORS = {
+    Signal.BUY: QColor("#1e8e3e"),
+    Signal.HOLD: QColor("#7a7a7a"),
+    Signal.AVOID: QColor("#d93025"),
+}
+
+
+def _money(v: float) -> str:
+    sign = "+" if v >= 0 else "-"
+    return f"{sign}${abs(v):,.0f}"
 
 DISCLAIMER = (
     "Real-position tracker — open lots are valued from ~15-min-delayed closes; "

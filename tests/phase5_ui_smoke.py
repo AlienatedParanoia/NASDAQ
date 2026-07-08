@@ -19,18 +19,17 @@ from data.fetcher import configure_yfinance  # noqa: E402
 SUBSET = ["AAPL", "MSFT", "NVDA", "KHC", "PEP", "TSLA", "PLTR", "XEL"]
 NEG_INF = float("-inf")
 
-# isolate the smoke test's user data from the real portfolio/investments files
+# isolate the smoke test's user data from the real investments file
 _TMP_PORTFOLIO_DIR = tempfile.mkdtemp()
-paths.portfolio_path = lambda: Path(_TMP_PORTFOLIO_DIR) / "portfolio.json"
 paths.investments_path = lambda: Path(_TMP_PORTFOLIO_DIR) / "investments.json"
 
 
-def _wait_portfolio_idle(app, panel, timeout: float = 180.0) -> None:
+def _wait_panel_idle(app, panel, timeout: float = 180.0) -> None:
     deadline = time.monotonic() + timeout
     while (panel._thread is not None or panel._dirty) and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.02)
-    assert panel._thread is None, "portfolio worker did not finish in time"
+    assert panel._thread is None, "panel worker did not finish in time"
     app.processEvents()
 
 
@@ -93,103 +92,29 @@ def main() -> None:
     assert win._detail._text.toPlainText(), "detail reasoning empty after selection"
     print("detail panel OK")
 
-    # ---- portfolio tab ----
-    from classifier.classify import Bucket
-
-    tabs = win.centralWidget()
-    tabs.setCurrentIndex(1)
-    panel = win._portfolio
-    assert panel._table.rowCount() == 0
-
-    panel._ticker_edit.setText("AAPL")
-    panel._amount_spin.setValue(1000)
-    panel._on_add()
-    _wait_portfolio_idle(app, panel)
-    panel._ticker_edit.setText("NVDA")
-    panel._amount_spin.setValue(3000)
-    panel._on_add()
-    _wait_portfolio_idle(app, panel)
-
-    assert panel._table.rowCount() == 2, panel._table.rowCount()
-    summary = panel._summary.text()
-    assert "Invested $4,000" in summary and "Sharpe" in summary, summary
-    print(f"portfolio summary OK: {summary[:110]}…")
-
-    nvda_row = next(
-        i for i in range(panel._table.rowCount())
-        if panel._table.item(i, 0).text() == "NVDA"
-    )
-    return_before = panel._table.item(nvda_row, 5).text()
-    combo = panel._table.cellWidget(nvda_row, 3)
-    combo.setCurrentIndex(1)  # Trend
-    _wait_portfolio_idle(app, panel)
-    nvda = next(h for h in panel._holdings if h.ticker == "NVDA")
-    assert nvda.strategy == Bucket.TREND.value, nvda.strategy
-    nvda_res = next(
-        r for r in panel._report.results if r.holding.ticker == "NVDA"
-    )
-    assert nvda_res.row.bucket is Bucket.TREND
-    nvda_row = next(
-        i for i in range(panel._table.rowCount())
-        if panel._table.item(i, 0).text() == "NVDA"
-    )
-    print(
-        f"strategy switch OK: NVDA return {return_before} -> "
-        f"{panel._table.item(nvda_row, 5).text()} under Trend"
-    )
-
-    panel._on_remove("AAPL")
-    _wait_portfolio_idle(app, panel)
-    assert panel._table.rowCount() == 1
-    print("holding removal OK")
-
-    # race regression: adding while a recompute is in flight must never
-    # persist an unvalidated (bogus) ticker
+    # ---- Portfolio tab (real-position tracker) ----
     import json as _json
 
-    import ui.portfolio_panel as pp
-
-    pp.QMessageBox = type(
-        "MB", (), {"warning": staticmethod(lambda *a, **k: None)}
-    )
-    panel._ticker_edit.setText("PEP")
-    panel._amount_spin.setValue(500)
-    panel._on_add()  # may start a worker...
-    panel._ticker_edit.setText("ZZFAKE99")
-    panel._amount_spin.setValue(500)
-    panel._on_add()  # ...so this lands mid-flight
-    for _ in range(4):  # allow queued revalidation cycles to settle
-        _wait_portfolio_idle(app, panel)
-        if panel._thread is None and not panel._dirty and not panel._pending:
-            break
-    tickers = {h.ticker for h in panel._holdings}
-    assert "ZZFAKE99" not in tickers, tickers
-    assert "PEP" in tickers, tickers
-    saved = _json.loads(paths.portfolio_path().read_text(encoding="utf-8"))
-    saved_tickers = {h["ticker"] for h in saved["holdings"]}
-    assert "ZZFAKE99" not in saved_tickers, saved_tickers
-    print("mid-flight add race: bogus ticker neither kept nor persisted")
-
-    # ---- my investments tab ----
     import ui.investments_panel as ip
     from PyQt6.QtCore import QDate
 
+    tabs = win.centralWidget()
     ip.QMessageBox = type("MB", (), {"warning": staticmethod(lambda *a, **k: None)})
-    tabs.setCurrentIndex(2)
+    tabs.setCurrentIndex(3)  # Scanner | Daily Report | Paper Trading | My Investments
     inv = win._investments
     assert inv._table.rowCount() == 0
     inv._ticker_edit.setText("AAPL")
     inv._in_spin.setValue(1000)
     inv._buy_date.setDate(QDate.currentDate().addYears(-1))
     inv._on_add()
-    _wait_portfolio_idle(app, inv)
+    _wait_panel_idle(app, inv)
     inv._ticker_edit.setText("MSFT")
     inv._in_spin.setValue(1500)
     inv._buy_date.setDate(QDate.currentDate().addYears(-1))
     inv._sold_check.setChecked(True)
     inv._out_spin.setValue(2000)
     inv._on_add()
-    _wait_portfolio_idle(app, inv)
+    _wait_panel_idle(app, inv)
     assert inv._table.rowCount() == 2, inv._table.rowCount()
     inv_summary = inv._summary.text()
     assert "Put in $2,500" in inv_summary and "since" in inv_summary, inv_summary
@@ -203,7 +128,7 @@ def main() -> None:
     )
     aapl_lot = next(l for l in inv._lots if l.ticker == "AAPL")
     inv._on_sell(aapl_lot)
-    _wait_portfolio_idle(app, inv)
+    _wait_panel_idle(app, inv)
     assert aapl_lot.money_out == 1750.0 and aapl_lot.sell_date
     aapl_res = next(r for r in inv._report.results if r.lot.ticker == "AAPL")
     assert abs(aapl_res.pnl - 750.0) < 1e-9
@@ -222,7 +147,7 @@ def main() -> None:
     inv._in_spin.setValue(500)
     inv._on_add()
     for _ in range(4):
-        _wait_portfolio_idle(app, inv)
+        _wait_panel_idle(app, inv)
         if inv._thread is None and not inv._dirty and not inv._pending:
             break
     assert "QQFAKE55" not in {l.ticker for l in inv._lots}

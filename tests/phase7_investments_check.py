@@ -144,19 +144,12 @@ def sale_day_curve_ends_at_proceeds(fetcher: DataFetcher) -> None:
 def structurally_bad_files_are_backed_up() -> None:
     """Review regression: valid JSON with the wrong structure must be backed
     up before the app can overwrite it."""
-    from portfolio.manager import load_portfolio
-
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "investments.json"
         p.write_text(json.dumps({"lots": "not-a-list"}), encoding="utf-8")
         assert load_investments(p) == []
         assert p.with_suffix(".json.bak").exists(), "structural damage not backed up"
         assert not p.exists()
-
-        q = Path(tmp) / "portfolio.json"
-        q.write_text(json.dumps({"holdings": 42}), encoding="utf-8")
-        assert load_portfolio(q) == []
-        assert q.with_suffix(".json.bak").exists()
     print("structurally-bad user files are backed up, not silently overwritten")
 
 

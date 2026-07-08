@@ -33,14 +33,16 @@ def log_path() -> Path:
     return data_dir() / "advisor.log"
 
 
-def portfolio_path() -> Path:
+def investments_path() -> Path:
     # user data, deliberately separate from cache.db (which is wiped on
     # CACHE_VERSION bumps)
-    return data_dir() / "portfolio.json"
-
-
-def investments_path() -> Path:
     return data_dir() / "investments.json"
+
+
+def paper_trading_path() -> Path:
+    # a forward-simulated paper trading session — user data, separate from
+    # cache.db (which is wiped on CACHE_VERSION bumps) like investments.json
+    return data_dir() / "paper_trading.json"
 
 
 def setup_logging(level: int = logging.INFO) -> None:
