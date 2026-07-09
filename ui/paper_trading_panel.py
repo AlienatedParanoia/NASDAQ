@@ -12,12 +12,10 @@ reported and NOT saved.
 """
 from __future__ import annotations
 
-import datetime as _dt
 import logging
 import threading
 
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -38,7 +36,6 @@ from PyQt6.QtWidgets import (
 )
 
 import paths
-from classifier.classify import Bucket
 from portfolio.paper import (
     PaperHolding,
     PaperReport,
@@ -49,23 +46,18 @@ from portfolio.paper import (
     save_paper,
     today_iso,
 )
-from signals.signal_generator import Signal
+from ui.common import (
+    SIDE_COLORS,
+    SIGNAL_COLORS,
+    STRATEGY_CHOICES,
+    day_month,
+    money,
+    strategy_choice_index,
+    strategy_choice_label,
+)
 from ui.detail_panel import DetailPanel
 
 log = logging.getLogger(__name__)
-
-STRATEGY_CHOICES = (
-    ("Recommended (auto)", None),
-    ("Trend", Bucket.TREND.value),
-    ("Mean-reversion", Bucket.MEAN_REVERSION.value),
-    ("Long-term hold", Bucket.LONG_TERM.value),
-)
-_STRATEGY_LABELS = {value: label for label, value in STRATEGY_CHOICES}
-
-
-def strategy_choice_label(strategy: str | None) -> str:
-    return _STRATEGY_LABELS.get(strategy, "Recommended (auto)")
-
 
 # columns: ... plus an Edit and a Remove action button at the end. "Added" is
 # the date this holding's fake money went in — its P&L is measured from there.
@@ -74,14 +66,7 @@ COLS = (
     "Trades", "Value", "P&L", "Return", "", "",
 )
 
-SIGNAL_COLORS = {
-    Signal.BUY: QColor("#1e8e3e"),
-    Signal.HOLD: QColor("#7a7a7a"),
-    Signal.AVOID: QColor("#d93025"),
-}
-
 BLOTTER_COLS = ("Date", "Ticker", "Side", "Price")
-SIDE_COLORS = {"Buy": QColor("#1e8e3e"), "Sell": QColor("#d93025")}
 
 DISCLAIMER = (
     "Paper trading — a forward simulation, valued at the latest close. Each "
@@ -89,19 +74,6 @@ DISCLAIMER = (
     "in. No costs/slippage; P&L begins near $0 and builds as new trading days "
     "pass. Past performance guarantees nothing."
 )
-
-
-def _money(v: float) -> str:
-    sign = "+" if v >= 0 else "-"
-    return f"{sign}${abs(v):,.0f}"
-
-
-def _day_month(iso: str) -> str:
-    """ISO YYYY-MM-DD -> DD/MM. Anything unparseable renders as-is."""
-    try:
-        return _dt.date.fromisoformat(iso).strftime("%d/%m")
-    except (ValueError, TypeError):
-        return iso
 
 
 class PaperTradeDialog(QDialog):
@@ -132,12 +104,7 @@ class PaperTradeDialog(QDialog):
             self._ticker.setText(edit.ticker)
             self._ticker.setReadOnly(True)
             self._budget.setValue(edit.budget)
-            self._strategy.setCurrentIndex(
-                next(
-                    (k for k, (_, v) in enumerate(STRATEGY_CHOICES) if v == edit.strategy),
-                    0,
-                )
-            )
+            self._strategy.setCurrentIndex(strategy_choice_index(edit.strategy))
 
         form = QFormLayout()
         form.addRow("Ticker", self._ticker)
@@ -507,7 +474,7 @@ class PaperTradingPanel(QWidget):
             h = res.holding
             self._set_item(i, 0, h.ticker)
             self._set_item(i, 1, f"${h.budget:,.0f}")
-            added = QTableWidgetItem(_day_month(res.start_date))
+            added = QTableWidgetItem(day_month(res.start_date))
             added.setToolTip(res.start_date)  # the year, for older sessions
             self._table.setItem(i, 2, added)
             # the chosen algorithm actually run (recommended shows what auto picked)
@@ -530,7 +497,7 @@ class PaperTradingPanel(QWidget):
                 self._set_item(
                     i, 7, f"${res.value:,.0f}" if res.value is not None else "—"
                 )
-                self._set_item(i, 8, _money(res.pnl) if res.pnl is not None else "—")
+                self._set_item(i, 8, money(res.pnl) if res.pnl is not None else "—")
                 self._set_item(
                     i, 9, f"{res.ret:+.1%}" if res.ret is not None else "—"
                 )
@@ -556,7 +523,7 @@ class PaperTradingPanel(QWidget):
             text = (
                 f"Started ${report.total_budget:,.0f} on {report.start_date}  |  "
                 f"Value ${report.current_value:,.0f}  |  "
-                f"P&L {_money(report.pnl)}  |  "
+                f"P&L {money(report.pnl)}  |  "
                 f"Return {report.total_return:+.1%}"
             )
             if report.cagr is not None:
