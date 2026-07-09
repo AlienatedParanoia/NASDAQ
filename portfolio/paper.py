@@ -3,7 +3,8 @@
 A paper session is a fake portfolio anchored to a start date. The user adds
 tickers with a fake dollar budget and (optionally) a chosen algorithm; each
 holding deploys that algorithm and the session reports what it has made SINCE
-the start date, marked to market at the latest cached close.
+the day that holding's money went in (its `added` date, never earlier than the
+session start), marked to market at the latest cached close.
 
 No new trade-execution engine is needed. generate_signal already runs the
 chosen strategy and returns its daily strategy returns (row.returns) and its
@@ -73,6 +74,7 @@ class PaperHolding:
     ticker: str
     budget: float                 # fake dollars deployed on this ticker
     strategy: str | None = None   # a Bucket value string; None = recommended
+    added: str | None = None      # ISO date the money went in; None = session start
 
 
 @dataclass(slots=True)
@@ -80,6 +82,25 @@ class PaperSession:
     name: str
     start_date: str               # ISO YYYY-MM-DD; the forward anchor
     holdings: list[PaperHolding] = field(default_factory=list)
+
+
+def holding_start(holding: PaperHolding, session_start: str) -> str:
+    """ISO date this holding's fake money was deployed.
+
+    Sessions written before per-holding dates existed have no `added`, so their
+    money is treated as deployed at the session start."""
+    return holding.added or session_start
+
+
+def _holding_anchor(holding: PaperHolding, session_start: pd.Timestamp) -> pd.Timestamp:
+    """The bar on/after which this holding's returns start counting. Never
+    earlier than the session itself, whatever the file says."""
+    try:
+        added = pd.Timestamp(holding.added) if holding.added else session_start
+    except ValueError:
+        log.warning("%s: unparseable added date %r", holding.ticker, holding.added)
+        return session_start
+    return max(added, session_start)
 
 
 # ------------------------------------------------------------- persistence
@@ -92,7 +113,12 @@ def load_paper(path: Path | None = None) -> PaperSession:
     try:
         sess = raw["session"]
         holdings = [
-            PaperHolding(str(h["ticker"]).upper(), float(h["budget"]), h.get("strategy"))
+            PaperHolding(
+                str(h["ticker"]).upper(),
+                float(h["budget"]),
+                h.get("strategy"),
+                h.get("added"),
+            )
             for h in raw["holdings"]
             if float(h["budget"]) > 0
         ]
@@ -115,7 +141,12 @@ def save_paper(session: PaperSession, path: Path | None = None) -> None:
         "version": PAPER_VERSION,
         "session": {"name": session.name, "start_date": session.start_date},
         "holdings": [
-            {"ticker": h.ticker, "budget": h.budget, "strategy": h.strategy}
+            {
+                "ticker": h.ticker,
+                "budget": h.budget,
+                "strategy": h.strategy,
+                "added": h.added,
+            }
             for h in session.holdings
         ],
     })
@@ -136,9 +167,10 @@ class PaperHoldingResult:
     holding: PaperHolding
     row: ScanRow | None           # None when the ticker produced no data
     strategy_label: str           # which algorithm actually ran
-    value: float | None           # current fake value since the session start
+    start_date: str               # ISO date this holding's money was deployed
+    value: float | None           # current fake value since this holding's start
     pnl: float | None
-    ret: float | None             # return since the session start
+    ret: float | None             # return since this holding's start
     position: str                 # "In", "Flat", or "—"
     n_trades: int                 # fills executed since the session start
     signal: Signal | None
@@ -203,7 +235,8 @@ def _fills_since(ticker: str, trades: Sequence[Trade], start: pd.Timestamp) -> l
 def _analyze_holding(
     holding: PaperHolding, data: StockData, start: pd.Timestamp, window_years: int
 ) -> tuple[PaperHoldingResult, pd.Series, list[BlotterFill]]:
-    """Deploy the holding's algorithm and measure it since the session start.
+    """Deploy the holding's algorithm and measure it since `start` — the date
+    this holding's money went in, not necessarily the session start.
 
     Returns (result, this holding's equity curve since start indexed on the
     stock's own calendar for the portfolio V(t) aggregation, fills executed
@@ -235,6 +268,7 @@ def _analyze_holding(
         holding=holding,
         row=row,
         strategy_label=label,
+        start_date=str(start.date()),
         value=value,
         pnl=pnl,
         ret=ret,
@@ -245,10 +279,13 @@ def _analyze_holding(
     return result, equity, fills
 
 
-def _error_result(holding: PaperHolding, error: str) -> PaperHoldingResult:
+def _error_result(
+    holding: PaperHolding, start_date: str, error: str
+) -> PaperHoldingResult:
     return PaperHoldingResult(
-        holding=holding, row=None, strategy_label="—", value=None, pnl=None,
-        ret=None, position="—", n_trades=0, signal=None, error=error,
+        holding=holding, row=None, strategy_label="—", start_date=start_date,
+        value=None, pnl=None, ret=None, position="—", n_trades=0, signal=None,
+        error=error,
     )
 
 
@@ -261,27 +298,34 @@ def analyze_paper(
     start = pd.Timestamp(session.start_date)
     results: list[PaperHoldingResult] = []
     curves: list[tuple[pd.Series, float]] = []  # (equity curve, budget cash-fill)
+    # budgets of holdings deployed too recently to have a single bar yet: still
+    # fake cash the session is holding, so V(t) must carry them or day one shows
+    # a phantom loss against total_budget_usable
+    idle_cash = 0.0
     blotter: list[BlotterFill] = []
 
     for h in session.holdings:
         if should_stop is not None and should_stop():
             break
+        anchor = _holding_anchor(h, start)
         try:
             result, equity, fills = _analyze_holding(
-                h, fetcher.get_stock(h.ticker), start, window_years
+                h, fetcher.get_stock(h.ticker), anchor, window_years
             )
         except FetchError as e:
             log.warning("%s: excluded from paper session: %s", h.ticker, e)
-            results.append(_error_result(h, str(e)))
+            results.append(_error_result(h, str(anchor.date()), str(e)))
             continue
         except Exception as e:  # noqa: BLE001 — one holding never kills the report
             log.exception("%s: paper analysis failed", h.ticker)
-            results.append(_error_result(h, str(e)))
+            results.append(_error_result(h, str(anchor.date()), str(e)))
             continue
         results.append(result)
         blotter.extend(fills)
         if len(equity) > 0:
             curves.append((equity, h.budget))
+        else:
+            idle_cash += h.budget
 
     blotter.sort(key=lambda f: (f.date, f.ticker))
     total_budget = float(sum(h.budget for h in session.holdings))
@@ -311,7 +355,7 @@ def analyze_paper(
         frame = frame.ffill()
         for i, (_, budget) in enumerate(curves):
             frame[i] = frame[i].fillna(budget)
-        v = frame.sum(axis=1)
+        v = frame.sum(axis=1) + idle_cash
         value_curve = v
         if len(v) >= 2 and total_budget_usable > 0:
             r_v = v.pct_change()

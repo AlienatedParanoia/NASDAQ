@@ -22,9 +22,11 @@ from portfolio.paper import (
     PaperHolding,
     PaperSession,
     _fills_since,
+    _holding_anchor,
     _holding_pnl,
     _position_of,
     analyze_paper,
+    holding_start,
     load_paper,
     save_paper,
 )
@@ -76,19 +78,49 @@ def fills_and_position_respect_start() -> None:
     print(f"fills sliced to >= start OK: {got}; position derivation OK")
 
 
+def added_date_anchors_the_holding() -> None:
+    session_start = pd.Timestamp("2026-06-01")
+
+    # no added date (legacy file): the money is treated as in at session start
+    legacy = PaperHolding("AAA", 1000.0, None)
+    assert holding_start(legacy, "2026-06-01") == "2026-06-01"
+    assert _holding_anchor(legacy, session_start) == session_start
+
+    # added later: that later date anchors the slice
+    later = PaperHolding("BBB", 1000.0, None, "2026-06-20")
+    assert holding_start(later, "2026-06-01") == "2026-06-20"
+    assert _holding_anchor(later, session_start) == pd.Timestamp("2026-06-20")
+
+    # a date before the session (hand-edited file) can't back-date the holding,
+    # and an unparseable one falls back rather than exploding
+    early = PaperHolding("CCC", 1000.0, None, "2020-01-01")
+    assert _holding_anchor(early, session_start) == session_start
+    assert _holding_anchor(PaperHolding("DDD", 1.0, None, "junk"), session_start) == session_start
+
+    # the anchor really does move the P&L: same series, two different money-in
+    # dates -> the later one compounds over fewer bars
+    idx = pd.date_range("2026-06-01", periods=10, freq="D")
+    returns = pd.Series([0.01] * 10, index=idx)
+    _, v_early, _, _ = _holding_pnl(returns, 1000.0, session_start)
+    _, v_late, _, _ = _holding_pnl(returns, 1000.0, idx[7])
+    assert v_early > v_late, (v_early, v_late)
+    print(f"added-date anchoring OK: from start ${v_early:,.2f} vs late entry ${v_late:,.2f}")
+
+
 def persistence_roundtrip_and_corruption() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "paper_trading.json"
         session = PaperSession(
             "My session", "2026-06-01",
             [
-                PaperHolding("AAPL", 1000.0, None),
-                PaperHolding("SHOP", 2500.0, Bucket.TREND.value),
+                PaperHolding("AAPL", 1000.0, None),  # legacy: no added date
+                PaperHolding("SHOP", 2500.0, Bucket.TREND.value, "2026-06-14"),
             ],
         )
         save_paper(session, p)
         loaded = load_paper(p)
         assert loaded == session, loaded
+        assert loaded.holdings[1].added == "2026-06-14"
         assert json.loads(p.read_text())["version"] == 1
         p.write_text("{ nope", encoding="utf-8")
         empty = load_paper(p)
@@ -110,11 +142,12 @@ def structurally_bad_files_are_backed_up() -> None:
 def analyze_paper_end_to_end(fetcher: DataFetcher) -> None:
     px = fetcher.get_stock("AAPL").prices
     start = px.index[-250]
+    msft_added = px.index[-100]  # money went in later than the session start
     session = PaperSession(
         "e2e", str(start.date()),
         [
             PaperHolding("AAPL", 1000.0, None),                    # recommended/auto
-            PaperHolding("MSFT", 2000.0, Bucket.TREND.value),      # forced trend
+            PaperHolding("MSFT", 2000.0, Bucket.TREND.value, str(msft_added.date())),
             PaperHolding("ZZINVALID77", 500.0, None),              # bad symbol
         ],
     )
@@ -125,6 +158,12 @@ def analyze_paper_end_to_end(fetcher: DataFetcher) -> None:
 
     usable = [r for r in report.results if r.error is None]
     assert len(usable) == 2
+    # each holding reports, and is measured from, its own money-in date
+    by_ticker = {r.holding.ticker: r for r in report.results}
+    assert by_ticker["AAPL"].start_date == str(start.date())
+    assert by_ticker["MSFT"].start_date == str(msft_added.date())
+    msft_fills = [f for f in report.blotter if f.ticker == "MSFT"]
+    assert all(f.date >= msft_added for f in msft_fills), "MSFT filled before its money went in"
     # overall P&L equals the sum of per-holding P&L exactly
     assert abs(sum(r.pnl for r in usable) - report.pnl) < 1e-6
     assert abs(report.current_value - sum(r.value for r in usable)) < 1e-6
@@ -143,6 +182,7 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     holding_pnl_slices_and_compounds()
     fills_and_position_respect_start()
+    added_date_anchors_the_holding()
     persistence_roundtrip_and_corruption()
     structurally_bad_files_are_backed_up()
     fetcher = DataFetcher(paths.db_path())

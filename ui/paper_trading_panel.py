@@ -66,9 +66,10 @@ def strategy_choice_label(strategy: str | None) -> str:
     return _STRATEGY_LABELS.get(strategy, "Recommended (auto)")
 
 
-# columns: ... plus an Edit and a Remove action button at the end
+# columns: ... plus an Edit and a Remove action button at the end. "Added" is
+# the date this holding's fake money went in — its P&L is measured from there.
 COLS = (
-    "Ticker", "Budget", "Strategy", "Signal", "Position",
+    "Ticker", "Budget", "Added", "Strategy", "Signal", "Position",
     "Trades", "Value", "P&L", "Return", "", "",
 )
 
@@ -82,9 +83,10 @@ BLOTTER_COLS = ("Date", "Ticker", "Side", "Price")
 SIDE_COLORS = {"Buy": QColor("#1e8e3e"), "Sell": QColor("#d93025")}
 
 DISCLAIMER = (
-    "Paper trading — a forward simulation from the session start date, valued at "
-    "the latest close. Fake money, no costs/slippage; P&L begins near $0 and "
-    "builds as new trading days pass. Past performance guarantees nothing."
+    "Paper trading — a forward simulation, valued at the latest close. Each "
+    "holding is measured from its own “Added” date, the day its fake money went "
+    "in. No costs/slippage; P&L begins near $0 and builds as new trading days "
+    "pass. Past performance guarantees nothing."
 )
 
 
@@ -131,6 +133,8 @@ class PaperTradeDialog(QDialog):
         form = QFormLayout()
         form.addRow("Ticker", self._ticker)
         form.addRow("Fake budget", self._budget)
+        if edit is not None and edit.added:
+            form.addRow("Money in", QLabel(edit.added))
         form.addRow("Algorithm", self._strategy)
 
         buttons = QDialogButtonBox(
@@ -371,11 +375,15 @@ class PaperTradingPanel(QWidget):
         self._generation += 1
         existing = next((h for h in self._session.holdings if h.ticker == ticker), None)
         if existing is not None:
+            # topping up keeps the original money-in date: the position is still
+            # measured from when it was first opened
             existing.budget += amount
             existing.strategy = strategy
             self._persist()  # already validated previously
         else:
-            self._session.holdings.append(PaperHolding(ticker, amount, strategy))
+            self._session.holdings.append(
+                PaperHolding(ticker, amount, strategy, today_iso())
+            )
             self._pending.add(ticker)  # persisted only after validation
         self.recompute()
 
@@ -490,29 +498,30 @@ class PaperTradingPanel(QWidget):
             h = res.holding
             self._set_item(i, 0, h.ticker)
             self._set_item(i, 1, f"${h.budget:,.0f}")
+            self._set_item(i, 2, res.start_date)
             # the chosen algorithm actually run (recommended shows what auto picked)
             strategy_text = (
                 res.strategy_label if res.error is None
                 else strategy_choice_label(h.strategy)
             )
-            self._set_item(i, 2, strategy_text)
+            self._set_item(i, 3, strategy_text)
 
             if res.error is not None:
-                for col in (3, 4, 5, 6, 7, 8):
-                    self._set_item(i, col, "no data" if col == 3 else "—")
+                for col in (4, 5, 6, 7, 8, 9):
+                    self._set_item(i, col, "no data" if col == 4 else "—")
             else:
                 sig_item = QTableWidgetItem(str(res.signal) if res.signal else "—")
                 if res.signal is not None:
                     sig_item.setForeground(SIGNAL_COLORS[res.signal])
-                self._table.setItem(i, 3, sig_item)
-                self._set_item(i, 4, res.position)
-                self._set_item(i, 5, str(res.n_trades))
+                self._table.setItem(i, 4, sig_item)
+                self._set_item(i, 5, res.position)
+                self._set_item(i, 6, str(res.n_trades))
                 self._set_item(
-                    i, 6, f"${res.value:,.0f}" if res.value is not None else "—"
+                    i, 7, f"${res.value:,.0f}" if res.value is not None else "—"
                 )
-                self._set_item(i, 7, _money(res.pnl) if res.pnl is not None else "—")
+                self._set_item(i, 8, _money(res.pnl) if res.pnl is not None else "—")
                 self._set_item(
-                    i, 8, f"{res.ret:+.1%}" if res.ret is not None else "—"
+                    i, 9, f"{res.ret:+.1%}" if res.ret is not None else "—"
                 )
 
             edit = QPushButton("Edit…")
