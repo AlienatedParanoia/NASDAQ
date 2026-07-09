@@ -12,6 +12,7 @@ reported and NOT saved.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import threading
 
@@ -69,7 +70,7 @@ def strategy_choice_label(strategy: str | None) -> str:
 # columns: ... plus an Edit and a Remove action button at the end. "Added" is
 # the date this holding's fake money went in — its P&L is measured from there.
 COLS = (
-    "Ticker", "Budget", "Added", "Strategy", "Signal", "Position",
+    "Ticker", "Budget", "Added (dd/mm)", "Strategy", "Signal", "Position",
     "Trades", "Value", "P&L", "Return", "", "",
 )
 
@@ -93,6 +94,14 @@ DISCLAIMER = (
 def _money(v: float) -> str:
     sign = "+" if v >= 0 else "-"
     return f"{sign}${abs(v):,.0f}"
+
+
+def _day_month(iso: str) -> str:
+    """ISO YYYY-MM-DD -> DD/MM. Anything unparseable renders as-is."""
+    try:
+        return _dt.date.fromisoformat(iso).strftime("%d/%m")
+    except (ValueError, TypeError):
+        return iso
 
 
 class PaperTradeDialog(QDialog):
@@ -498,7 +507,9 @@ class PaperTradingPanel(QWidget):
             h = res.holding
             self._set_item(i, 0, h.ticker)
             self._set_item(i, 1, f"${h.budget:,.0f}")
-            self._set_item(i, 2, res.start_date)
+            added = QTableWidgetItem(_day_month(res.start_date))
+            added.setToolTip(res.start_date)  # the year, for older sessions
+            self._table.setItem(i, 2, added)
             # the chosen algorithm actually run (recommended shows what auto picked)
             strategy_text = (
                 res.strategy_label if res.error is None
