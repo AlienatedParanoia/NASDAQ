@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import date
+from typing import Sequence
 
 from PyQt6.QtCore import QDate, QObject, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -64,6 +65,7 @@ from portfolio.tracker import (
 )
 from ui.common import (
     GREEN,
+    GREY,
     RED,
     SIGNAL_COLORS,
     STRATEGY_CHOICES,
@@ -270,7 +272,18 @@ class RealInvestmentPanel(QGroupBox):
     the positions, this one measures the account. They report the same profit
     (see portfolio/cash.py) but different denominators, and the difference is
     the whole point.
+
+    Three display states, and keeping them apart is the difference between a
+    useful panel and a lying one:
+
+    WAITING   a worker report is on its way. The numbers will arrive; say so.
+    PARTIAL   some position has no price data and never will. An unknown worth
+              is still non-negative, so what we can compute is a genuine lower
+              bound — shown with a "≥" and the excluded tickers named.
+    EXACT     everything is priced.
     """
+
+    WAITING, PARTIAL, EXACT = "waiting", "partial", "exact"
 
     _ROWS = (
         ("deposited", "Total deposited"),
@@ -280,12 +293,13 @@ class RealInvestmentPanel(QGroupBox):
         ("profit", "Real net profit"),
         ("return_pct", "Real return"),
     )
+    _DERIVED = ("account_value", "profit", "return_pct")
 
     def __init__(self) -> None:
         super().__init__("Real Investment")
         self._values: dict[str, QLabel] = {}
         self._labels: dict[str, QLabel] = {}
-        form = QFormLayout(self)
+        form = QFormLayout()
         for key, caption in self._ROWS:
             label = QLabel(caption)
             value = QLabel("—")
@@ -293,41 +307,50 @@ class RealInvestmentPanel(QGroupBox):
             self._values[key] = value
             form.addRow(label, value)
         self._values["profit"].setStyleSheet("font-weight: bold;")
-
-    def clear(self) -> None:
-        for value in self._values.values():
-            value.setText("—")
-            value.setStyleSheet("")
-        self._values["profit"].setStyleSheet("font-weight: bold;")
-        self._set_return_visible(False)
+        self._caveat = QLabel("")
+        self._caveat.setWordWrap(True)
+        self._caveat.setStyleSheet(f"color: {GREY.name()};")
+        self._caveat.setVisible(False)
+        outer = QVBoxLayout(self)
+        outer.addLayout(form)
+        outer.addWidget(self._caveat)
 
     def _set_return_visible(self, visible: bool) -> None:
         self._labels["return_pct"].setVisible(visible)
         self._values["return_pct"].setVisible(visible)
 
-    def show_pnl(self, r, priced: bool) -> None:
-        """`priced` is False while any open position lacks a market value — a
-        sale still awaiting its close, or a ticker Yahoo would not return. The
-        external-capital rows are exact regardless; the rows derived from
-        account value are withheld rather than shown short."""
+    def show_pnl(self, r, state: str, missing: Sequence[str] = ()) -> None:
+        """The external-capital rows are exact in every state: they read the
+        cash-flow log, which needs no prices. Only the rows derived from
+        account value depend on the market."""
         plain = lambda v: f"${v:,.2f}"  # noqa: E731 — these can't be negative
         self._values["deposited"].setText(plain(r.total_deposited))
         self._values["withdrawn"].setText(plain(r.total_withdrawn))
         self._values["net_external"].setText(plain(r.net_external))
 
-        if not priced:
-            for key in ("account_value", "profit", "return_pct"):
+        if state == self.WAITING:
+            for key in self._DERIVED:
                 self._values[key].setText("valuing…")
                 self._values[key].setStyleSheet("")
             self._values["profit"].setStyleSheet("font-weight: bold;")
             self._set_return_visible(True)
+            self._caveat.setVisible(False)
             return
 
-        self._values["account_value"].setText(plain(r.account_value))
+        bound = "≥ " if state == self.PARTIAL else ""
+        self._values["account_value"].setText(bound + plain(r.account_value))
+
+        # In PARTIAL the profit is a lower bound, so a negative figure does not
+        # establish a loss — the missing position could cover it. Colouring it
+        # red would assert something we have not shown. Green is safe: the gain
+        # can only be larger.
+        if state == self.PARTIAL and r.real_net_profit < 0:
+            colour = GREY
+        else:
+            colour = GREEN if r.real_net_profit >= 0 else RED
 
         profit = self._values["profit"]
-        profit.setText(money(r.real_net_profit))
-        colour = GREEN if r.real_net_profit >= 0 else RED
+        profit.setText(bound + money(r.real_net_profit))
         # QTableWidgetItem.setForeground doesn't exist on QLabel
         profit.setStyleSheet(f"font-weight: bold; color: {colour.name()};")
 
@@ -336,8 +359,15 @@ class RealInvestmentPanel(QGroupBox):
         self._set_return_visible(show_return)
         if show_return:
             value = self._values["return_pct"]
-            value.setText(f"{r.real_return_pct:+.1f}%")
+            value.setText(f"{bound}{r.real_return_pct:+.1f}%")
             value.setStyleSheet(f"color: {colour.name()};")
+
+        self._caveat.setVisible(state == self.PARTIAL)
+        if state == self.PARTIAL:
+            self._caveat.setText(
+                f"No price data for {', '.join(missing)} — excluded, so these "
+                f"are lower bounds: the true figures can only be higher."
+            )
 
 
 class InvestmentsWorker(QObject):
@@ -690,10 +720,20 @@ class InvestmentsPanel(QWidget):
 
     def _refresh_real(self) -> None:
         """Cash balance and the Real Investment panel. Both read the ledger, so
-        they are correct the moment a deposit lands — no worker round-trip."""
-        worth_by_lot = {
-            id(res.lot): res.worth
+        they are correct the moment a deposit lands — no worker round-trip.
+
+        A lot without a value is either *waiting* (no report has covered it
+        yet, one is coming) or *broken* (the worker priced it and Yahoo had
+        nothing). Conflating the two strands the panel on "valuing…" forever
+        for a delisted ticker, so they are separated here.
+        """
+        results = {
+            id(res.lot): res
             for res in (self._report.results if self._report else ())
+        }
+        worth_by_lot = {
+            lot_id: res.worth
+            for lot_id, res in results.items()
             if res.error is None and res.worth is not None
         }
         open_worth = {
@@ -703,16 +743,43 @@ class InvestmentsPanel(QWidget):
         }
         r = compute_real_pnl(self._lots, self._flows, open_worth)
 
-        # cash needs no prices; only an unpriced sale can leave it unknown
-        if r.unresolved_sales:
+        waiting: set[int] = set()
+        broken: set[int] = set()
+        for lot in self._lots:
+            # a sold lot needs its proceeds; an open one needs a market value
+            known = (
+                lot.money_out is not None if lot.is_sold
+                else id(lot) in worth_by_lot
+            )
+            if known:
+                continue
+            res = results.get(id(lot))
+            failed = res is not None and res.error is not None
+            (broken if failed else waiting).add(id(lot))
+
+        # Cash needs no prices — only a sale of unknown proceeds dents it, and
+        # an unresolved sale credits nothing (portfolio/cash.py), so the figure
+        # is understated: a lower bound, never an overstatement.
+        unpriced_sales = [
+            lot for lot in self._lots if lot.is_sold and lot.money_out is None
+        ]
+        if not unpriced_sales:
+            self._cash_label.setText(f"Cash: ${r.cash:,.2f}")
+        elif any(id(lot) in waiting for lot in unpriced_sales):
             self._cash_label.setText("Cash: valuing sale…")
         else:
-            self._cash_label.setText(f"Cash: ${r.cash:,.2f}")
+            self._cash_label.setText(f"Cash: ≥ ${r.cash:,.2f}")
 
-        priced = not r.unresolved_sales and all(
-            id(lot) in worth_by_lot for lot in self._lots if not lot.is_sold
-        )
-        self._real.show_pnl(r, priced)
+        tickers = lambda ids: sorted({  # noqa: E731
+            lot.ticker for lot in self._lots if id(lot) in ids
+        })
+        if waiting:
+            state, missing = RealInvestmentPanel.WAITING, ()
+        elif broken:
+            state, missing = RealInvestmentPanel.PARTIAL, tickers(broken)
+        else:
+            state, missing = RealInvestmentPanel.EXACT, ()
+        self._real.show_pnl(r, state, missing)
 
     def _render_empty(self) -> None:
         self._table.setRowCount(0)
