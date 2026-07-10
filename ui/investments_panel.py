@@ -16,8 +16,10 @@ lives in portfolio/cash.py.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import threading
+from dataclasses import dataclass
 from datetime import date
 from typing import Sequence
 
@@ -56,6 +58,7 @@ from portfolio.cash import (
     replay,
     validate,
 )
+from portfolio.storage import backup_file
 from portfolio.tracker import (
     InvestmentReport,
     Lot,
@@ -90,6 +93,25 @@ COLS = (
 
 # the cash ledger, exactly as portfolio/cash.py replays it
 LEDGER_COLS = ("Date", "Transaction", "Amount", "Cash balance")
+
+# how many actions back Undo can walk. The stack lives in memory only: closing
+# the app is not an undo, and restarting it starts fresh.
+MAX_UNDO = 20
+
+
+@dataclass(slots=True, eq=False)
+class Snapshot:
+    """The whole mutable state of the tab before one user action.
+
+    Deep-copied on the way in, because a Lot is mutated in place — a sale
+    writes sell_date, and the worker later writes money_out into the very same
+    object. A shallow copy would let those writes reach back and rewrite
+    history that Undo is holding.
+    """
+    label: str                  # names the action being undone, for the tooltip
+    lots: list[Lot]
+    flows: list[CashFlow]
+    pending: set[str]
 
 # every stat column, blanked out when a lot has no data
 _STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
@@ -448,6 +470,7 @@ class InvestmentsPanel(QWidget):
         self._worker: InvestmentsWorker | None = None
         self._dirty = False
         self._pending: set[str] = set()  # tickers never yet validated; unsaved
+        self._undo: list[Snapshot] = []  # in-memory only; see MAX_UNDO
         # bumped on every mutation; reports computed under an older generation
         # are discarded so a mid-flight Sell/Remove never renders mixed state
         self._generation = 0
@@ -459,6 +482,10 @@ class InvestmentsPanel(QWidget):
         deposit_btn.clicked.connect(lambda: self._on_cash_flow(DEPOSIT))
         withdraw_btn = QPushButton("Withdraw…")
         withdraw_btn.clicked.connect(lambda: self._on_cash_flow(WITHDRAWAL))
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.clicked.connect(self._on_undo)
+        self._reset_btn = QPushButton("Reset…")
+        self._reset_btn.clicked.connect(self._on_reset)
         # cash is now a first-class concept: a buy spends it, a sale refills it
         self._cash_label = QLabel("")
         self._cash_label.setStyleSheet("font-weight: bold;")
@@ -466,6 +493,8 @@ class InvestmentsPanel(QWidget):
         add_row.addWidget(add_btn)
         add_row.addWidget(deposit_btn)
         add_row.addWidget(withdraw_btn)
+        add_row.addWidget(self._undo_btn)
+        add_row.addWidget(self._reset_btn)
         add_row.addStretch(1)
         add_row.addWidget(self._cash_label)
 
@@ -528,6 +557,7 @@ class InvestmentsPanel(QWidget):
         outer.addWidget(splitter)
 
         self._render_empty()
+        self._update_undo_button()
         if self._lots:
             self.recompute()
 
@@ -579,6 +609,85 @@ class InvestmentsPanel(QWidget):
     def _refuse(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
 
+    # ----------------------------------------------------------------- undo
+
+    def _checkpoint(self, label: str) -> None:
+        """Record the state *before* an action. Call it only once the action is
+        certain to happen — after any validation or dialog cancel — or Undo
+        fills up with steps that changed nothing."""
+        self._undo.append(Snapshot(
+            label=label,
+            lots=copy.deepcopy(self._lots),
+            flows=copy.deepcopy(self._flows),
+            pending=set(self._pending),
+        ))
+        del self._undo[:-MAX_UNDO]   # keep the newest MAX_UNDO entries
+        self._update_undo_button()
+
+    def _drop_checkpoint(self, label: str) -> None:
+        """Forget the top checkpoint if it belongs to `label`. Used when an
+        action is undone by the app itself — a rejected ticker — so Undo does
+        not offer to reverse something that never took effect."""
+        if self._undo and self._undo[-1].label == label:
+            self._undo.pop()
+            self._update_undo_button()
+
+    def _update_undo_button(self) -> None:
+        can = bool(self._undo)
+        self._undo_btn.setEnabled(can)
+        self._undo_btn.setToolTip(
+            f"Undo: {self._undo[-1].label}" if can else "Nothing to undo"
+        )
+
+    def _on_undo(self) -> None:
+        if not self._undo:
+            return
+        snapshot = self._undo.pop()
+        self._generation += 1
+        self._lots = snapshot.lots
+        self._flows = snapshot.flows
+        self._pending = snapshot.pending
+        self._persist()
+        self._update_undo_button()
+        self._status.setText(f"Undid: {snapshot.label}")
+        # the restored lots are fresh objects, so the current report describes
+        # positions that no longer exist — drop it rather than render it
+        self._report = None
+        self._table.setRowCount(0)
+        self._detail.clear()
+        self.recompute()
+        if not self._lots:
+            self._render_empty()
+            self._status.setText(f"Undid: {snapshot.label}")
+
+    def _on_reset(self) -> None:
+        if not self._lots and not self._flows:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Reset My Investments",
+            f"Delete all {len(self._lots)} position(s) and {len(self._flows)} "
+            f"cash flow(s)?\n\nA backup of investments.json is kept, and this "
+            f"can be undone while the app stays open.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # the in-memory undo dies with the process; the file is the real safety
+        # net, so move it aside before anything overwrites it
+        backup_file(paths.investments_path())
+        self._checkpoint("Reset")
+        self._generation += 1
+        self._lots = []
+        self._flows = []
+        self._pending.clear()
+        self._report = None
+        self._persist()
+        self._detail.clear()
+        self._render_empty()
+        self._status.setText("Reset — a backup of your data was kept.")
+
     def _on_new_investment(self) -> None:
         dialog = InvestmentDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -607,6 +716,7 @@ class InvestmentsPanel(QWidget):
         already_validated = any(
             l.ticker == ticker and l.ticker not in self._pending for l in self._lots
         )
+        self._checkpoint(f"Add {ticker}")
         self._generation += 1
         self._lots.append(lot)
         if not already_validated:
@@ -645,6 +755,7 @@ class InvestmentsPanel(QWidget):
         if error is not None:
             self._refuse("Not enough cash", error)
             return
+        self._checkpoint(f"Edit {lot.ticker}")
         self._generation += 1
         lot.money_in = money_in
         lot.buy_date = updated.buy_date
@@ -667,6 +778,7 @@ class InvestmentsPanel(QWidget):
         if error is not None:
             self._refuse("Not enough cash", error)
             return
+        self._checkpoint("Deposit" if direction == DEPOSIT else "Withdrawal")
         self._flows.append(flow)
         self._persist()
         # external cash moves no position, so nothing needs revaluing and the
@@ -691,6 +803,7 @@ class InvestmentsPanel(QWidget):
         if error is not None:  # pragma: no cover - unreachable by construction
             self._refuse("Cannot remove", error)
             return
+        self._checkpoint(f"Remove {lot.ticker}")
         self._generation += 1
         self._lots = remaining
         if not any(l.ticker == lot.ticker for l in self._lots):
@@ -702,6 +815,7 @@ class InvestmentsPanel(QWidget):
         dialog = SellDialog(self, lot)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._checkpoint(f"Sell {lot.ticker}")
         self._generation += 1
         # the lot stays on the books; leaving money_out None makes the tracker
         # value it at the close on this date, freezing the return it earned.
@@ -726,6 +840,7 @@ class InvestmentsPanel(QWidget):
         if error is not None:
             self._refuse("Cannot undo this sale", error)
             return
+        self._checkpoint(f"Undo sale of {lot.ticker}")
         self._generation += 1
         lot.sell_date = None
         lot.sell_seq = None
@@ -759,6 +874,9 @@ class InvestmentsPanel(QWidget):
             else:
                 self._lots = [l for l in self._lots if l.ticker != pending]
                 self._pending.discard(pending)
+                # the app just reversed the add itself; offering to undo it
+                # again would walk the user back past an action they never saw
+                self._drop_checkpoint(f"Add {pending}")
                 rejected.append((pending, errors[0]))
         self._resolve_proceeds(report)
         self._persist()
