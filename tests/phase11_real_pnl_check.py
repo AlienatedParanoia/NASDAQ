@@ -180,12 +180,35 @@ def scenario_5_partial_withdrawal() -> None:
     assert abs(r.real_return_pct - 300.0) < TOL
 
 
-def buy_beyond_cash_is_rejected() -> None:
+def buy_beyond_cash_auto_funds_the_shortfall() -> None:
+    """A purchase larger than the cash on hand is not refused. The excess could
+    only have come from outside, so it is recorded as a deposit on the buy."""
     flows = [_flow(2000, DEPOSIT, "2026-01-02", 0)]
     lots = [Lot("A", 2500.0, "2026-01-05", buy_seq=1)]
-    err = validate(lots, flows)
-    assert err is not None and "Buy A" in err and "$500.00" in err, err
-    print(f"overdraft rejected: {err}")
+    assert validate(lots, flows) is None
+
+    r = compute_real_pnl(lots, flows, {0: 2500.0})
+    assert abs(r.auto_funded - 500.0) < TOL, r.auto_funded
+    assert abs(r.total_deposited - 2500.0) < TOL   # $2,000 typed + $500 inferred
+    assert abs(r.cash) < TOL
+    assert abs(r.real_net_profit) < TOL            # bought at 2500, worth 2500
+    print(f"buy beyond cash auto-funded ${r.auto_funded:,.0f}")
+
+
+def cash_on_hand_is_spent_before_new_capital_is_invented() -> None:
+    """The guarantee the old deposit-first rule bought, kept. A buy funded by
+    an earlier sale must create no deposit, or reinvested profit would be
+    miscounted as money from the bank — the whole point of the feature."""
+    flows = [_flow(2000, DEPOSIT, "2026-01-02", 0)]
+    lots = [
+        Lot("A", 2000.0, "2026-01-05", money_out=5000.0, sell_date="2026-03-01",
+            buy_seq=1, sell_seq=2),
+        Lot("B", 3000.0, "2026-03-02", buy_seq=3),  # funded entirely by the sale
+    ]
+    r = compute_real_pnl(lots, flows, {1: 3000.0})
+    assert r.auto_funded == 0.0, "reinvestment must not look like a deposit"
+    assert abs(r.net_external - 2000.0) < TOL
+    print("reinvested proceeds fund the next buy; no deposit inferred")
 
 
 def withdrawal_beyond_cash_is_rejected() -> None:
@@ -199,33 +222,67 @@ def withdrawal_beyond_cash_is_rejected() -> None:
     print(f"withdrawal rejected: {err}")
 
 
-def backdated_buy_names_the_offending_event() -> None:
-    """A buy inserted before its funding deposit must be refused, and the
-    message must name the buy — not some later, innocent transaction."""
-    flows = [_flow(2000, DEPOSIT, "2026-03-01", 0)]
-    lots = [Lot("EARLY", 500.0, "2026-02-01", buy_seq=1)]
-    err = validate(lots, flows)
-    assert err is not None and "Buy EARLY" in err and "2026-02-01" in err, err
-
-    # the same buy after the deposit is fine
-    lots = [Lot("EARLY", 500.0, "2026-03-02", buy_seq=1)]
+def backdated_buy_funds_itself_on_its_own_date() -> None:
+    """The case that drove this design: an investment bought in 2024, entered
+    today. The deposit the user later typed cannot fund it — it had not
+    happened yet — so the buy is funded on its own date and simply works."""
+    flows = [_flow(10_000, DEPOSIT, "2026-07-10", 5)]   # dated today
+    lots = [Lot("OLD", 2000.0, "2024-05-01", buy_seq=1)]
     assert validate(lots, flows) is None
-    print("backdated buy rejected and named correctly")
+
+    rows = [(e.date, e.kind, e.delta) for e in ledger_events(lots, flows)]
+    assert rows == [
+        ("2024-05-01", "autofund", 2000.0),   # inferred, dated on the buy
+        ("2024-05-01", "buy", -2000.0),
+        ("2026-07-10", "deposit", 10_000.0),
+    ], rows
+
+    r = compute_real_pnl(lots, flows, {0: 3000.0})
+    assert abs(r.cash - 10_000.0) < TOL           # the typed deposit, uninvested
+    assert abs(r.net_external - 12_000.0) < TOL   # $10,000 typed + $2,000 inferred
+    assert abs(r.account_value - 13_000.0) < TOL  # cash + the position
+    assert abs(r.real_net_profit - 1000.0) < TOL  # bought 2000, now worth 3000
+    print("backdated buy funds itself on its own date")
 
 
-def undo_sell_that_funds_a_later_buy_is_rejected() -> None:
-    """Reopening a sold lot withdraws its credit, lowering every later balance.
-    This is the one action whose replay check is not vacuous."""
+def explicit_deposit_beats_inference() -> None:
+    """An explicit deposit is how the user says "I transferred $10,000 in and
+    left $8,000 uninvested". Without it, only the invested $2,000 would count
+    as capital and the return would be flattered."""
+    lots = [Lot("A", 2000.0, "2026-01-05", buy_seq=1)]
+
+    inferred = compute_real_pnl(lots, [], {0: 2500.0})
+    assert abs(inferred.net_external - 2000.0) < TOL
+    assert abs(inferred.real_return_pct - 25.0) < TOL
+
+    flows = [_flow(10_000, DEPOSIT, "2026-01-02", 0)]
+    stated = compute_real_pnl(lots, flows, {0: 2500.0})
+    assert stated.auto_funded == 0.0
+    assert abs(stated.net_external - 10_000.0) < TOL
+    assert abs(stated.cash - 8000.0) < TOL
+    assert abs(stated.real_return_pct - 5.0) < TOL   # same $500 on a bigger base
+    print("explicit deposit measured against the full transfer, not the buy")
+
+
+def undo_sell_reassigns_the_funding_to_external_capital() -> None:
+    """Reopening a sold lot withdraws its credit. A later buy it had funded is
+    no longer covered by cash, so that money must have come from outside: it
+    becomes an inferred deposit, raising external capital and lowering profit.
+    Nothing is refused, but the reported return legitimately changes."""
     flows = [_flow(2000, DEPOSIT, "2026-01-02", 0)]
     sold = Lot("A", 2000.0, "2026-01-05", money_out=5000.0,
                sell_date="2026-03-01", buy_seq=1, sell_seq=2)
     later = Lot("B", 3000.0, "2026-03-02", buy_seq=3)
-    assert validate([sold, later], flows) is None
+    before = compute_real_pnl([sold, later], flows, {1: 3000.0})
+    assert before.auto_funded == 0.0 and before.net_external == 2000.0
 
     reopened = Lot("A", 2000.0, "2026-01-05", buy_seq=1)  # sale undone
-    err = validate([reopened, later], flows)
-    assert err is not None and "Buy B" in err, err
-    print(f"undo-sell rejected: {err}")
+    assert validate([reopened, later], flows) is None
+    after = compute_real_pnl([reopened, later], flows, {0: 5000.0, 1: 3000.0})
+    assert abs(after.auto_funded - 3000.0) < TOL
+    assert abs(after.net_external - 5000.0) < TOL
+    assert abs(after.real_net_profit - 3000.0) < TOL   # A is open and up $3,000
+    print(f"undo-sell reassigned ${after.auto_funded:,.0f} to external capital")
 
 
 def removing_an_open_lot_can_never_overdraw() -> None:
@@ -278,17 +335,44 @@ def no_external_capital_has_no_return_pct() -> None:
 
 def same_date_events_replay_in_entry_order() -> None:
     """Deposit and buy on the same day: seq decides, so the deposit funds the
-    buy rather than the buy overdrawing an account it is about to fill."""
+    buy rather than the buy inferring capital the user has already typed in."""
     flows = [_flow(2000, DEPOSIT, "2026-01-05", 0)]
     lots = [Lot("A", 2000.0, "2026-01-05", buy_seq=1)]
-    assert validate(lots, flows) is None
-    assert abs(current_cash(lots, flows)) < TOL
+    r = compute_real_pnl(lots, flows, {0: 2000.0})
+    assert r.auto_funded == 0.0 and abs(r.cash) < TOL
 
-    # entered the other way round, the buy comes first and overdraws
+    # entered the other way round the buy comes first, so it funds itself and
+    # the deposit lands afterwards as idle cash. Nothing is lost or refused —
+    # but the capital is double what the user meant, so entry order matters.
     flows = [_flow(2000, DEPOSIT, "2026-01-05", 5)]
     lots = [Lot("A", 2000.0, "2026-01-05", buy_seq=1)]
-    assert validate(lots, flows) is not None
+    r = compute_real_pnl(lots, flows, {0: 2000.0})
+    assert abs(r.auto_funded - 2000.0) < TOL
+    assert abs(r.cash - 2000.0) < TOL
+    assert abs(r.net_external - 4000.0) < TOL
     print("same-date events replay in entry order")
+
+
+def scenarios_reproduce_with_no_deposits_at_all() -> None:
+    """Auto-funding must not change a single headline number. Scenario 4 with
+    every deposit removed lands on the same cash, account value and profit —
+    proof that inference reconstructs exactly the capital the user would have
+    typed, and that reinvestment still creates none."""
+    lots = [
+        Lot("A", 2000.0, "2026-01-05", money_out=5000.0, sell_date="2026-03-01",
+            buy_seq=1, sell_seq=2),
+        Lot("B", 3000.0, "2026-03-02", money_out=4000.0, sell_date="2026-05-01",
+            buy_seq=3, sell_seq=4),
+        Lot("C", 5000.0, "2026-05-02", buy_seq=5),
+    ]
+    r = _check(
+        "scenario 4, no deposits entered", lots, [], {2: 1500.0},
+        cash=1000.0, account=2500.0, profit=500.0,
+    )
+    assert abs(r.auto_funded - 2000.0) < TOL, r.auto_funded
+    assert abs(r.net_external - 2000.0) < TOL
+    assert abs(r.real_return_pct - 25.0) < TOL
+    print("  -> only the first $2,000 was inferred; both reinvestments were free")
 
 
 def ledger_rows_read_as_a_statement() -> None:
@@ -350,11 +434,16 @@ def document_roundtrip_and_v2_upgrade() -> None:
         assert got_flows == []
         assert [l.buy_seq for l in got_lots] == [0, 1]
         assert got_lots[1].sell_seq is None
-        # no deposits recorded, so a legacy portfolio reads as fully "profit"
-        # until the user logs what they actually put in — it does not crash
+        # a v2 file records no cash flows at all, but auto-funding infers the
+        # capital each buy needed, so a legacy portfolio reports real numbers
+        # instead of a meaningless zero base
         r = compute_real_pnl(got_lots, got_flows, {0: 1200.0})
-        assert r.net_external == 0.0 and r.real_return_pct is None
-    print("document round-trip OK; v2 files load with defaulted seqs")
+        assert abs(r.auto_funded - 1750.0) < TOL     # AAPL $1,000 + SHOP $750
+        assert abs(r.net_external - 1750.0) < TOL
+        assert abs(r.cash - 900.0) < TOL             # SHOP's proceeds
+        assert abs(r.account_value - 2100.0) < TOL   # cash + AAPL at $1,200
+        assert abs(r.real_net_profit - 350.0) < TOL  # +$200 AAPL, +$150 SHOP
+    print("document round-trip OK; v2 files load and infer their capital")
 
 
 SCENARIOS = (
@@ -363,13 +452,16 @@ SCENARIOS = (
     scenario_3_reinvest_all,
     scenario_4_chain_ending_in_loss,
     scenario_5_partial_withdrawal,
+    scenarios_reproduce_with_no_deposits_at_all,
 )
 
 NEGATIVE_PATHS = (
-    buy_beyond_cash_is_rejected,
+    buy_beyond_cash_auto_funds_the_shortfall,
+    cash_on_hand_is_spent_before_new_capital_is_invented,
     withdrawal_beyond_cash_is_rejected,
-    backdated_buy_names_the_offending_event,
-    undo_sell_that_funds_a_later_buy_is_rejected,
+    backdated_buy_funds_itself_on_its_own_date,
+    explicit_deposit_beats_inference,
+    undo_sell_reassigns_the_funding_to_external_capital,
     removing_an_open_lot_can_never_overdraw,
     unresolved_sale_understates_cash,
     no_external_capital_has_no_return_pct,

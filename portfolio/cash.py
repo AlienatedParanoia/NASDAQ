@@ -7,7 +7,7 @@ previous sale looks exactly like a lot funded by a fresh bank transfer. Summing
 which is not the question the user is asking.
 
 This module adds the missing half. Every dollar entering or leaving the account
-from outside is recorded as a CashFlow; everything else — buys, sales — merely
+from outside counts as external capital; everything else — buys, sales — merely
 moves money between the cash balance and the positions. The number the user
 actually wants is then:
 
@@ -15,6 +15,14 @@ actually wants is then:
 
 where account value is cash plus the market value of the open positions, and
 net external capital is deposits minus withdrawals.
+
+External capital comes from two places. The user may record a deposit
+explicitly, which is the only way to say "I transferred $10,000 in and left
+$8,000 of it uninvested". Otherwise a purchase that exceeds the cash on hand
+is assumed to have been funded from outside for exactly the shortfall, and
+`ledger_events` records that inferred deposit on the buy date. Cash on hand is
+always spent first, so a purchase funded by an earlier sale creates no deposit
+and reinvested profit is never mistaken for money from the bank.
 
 No cash balance is stored. It is replayed from the ledger on demand, because a
 stored balance is a second source of truth that can silently drift out of
@@ -49,6 +57,11 @@ if TYPE_CHECKING:  # tracker imports CashFlow for persistence; keep it one-way
 DEPOSIT = "deposit"
 WITHDRAWAL = "withdrawal"
 
+# event kinds, for the replay
+BUY = "buy"
+SELL = "sell"
+AUTOFUND = "autofund"
+
 # money compares are float compares; a balance this close to zero is zero
 EPS = 1e-6
 
@@ -81,8 +94,10 @@ class Event:
     date: str
     seq: int
     delta: float
+    kind: str                # DEPOSIT | WITHDRAWAL | BUY | SELL | AUTOFUND
     title: str
     label: str
+    subject: str | None = None   # the ticker, for lot legs
 
 
 @dataclass(slots=True, eq=False)
@@ -96,6 +111,7 @@ class RealPnL:
     real_net_profit: float           # account_value - net_external
     real_return_pct: float | None    # None when net_external <= 0
     unresolved_sales: int            # sold lots still awaiting their proceeds
+    auto_funded: float               # of total_deposited, how much was inferred
 
 
 def _money(v: float) -> str:
@@ -110,12 +126,12 @@ def is_unresolved_sale(lot: Lot) -> bool:
     return lot.sell_date is not None and lot.money_out is None
 
 
-def ledger_events(
+def _recorded_events(
     lots: Sequence[Lot], flows: Sequence[CashFlow]
 ) -> list[Event]:
-    """Every cash movement, in the order it happened. A buy debits on its buy
-    date; a sale credits on its sell date; the two legs of one lot are
-    independent events, which is what makes a backdated buy checkable."""
+    """The events the user actually entered, in the order they happened. A buy
+    debits on its buy date; a sale credits on its sell date; the two legs of
+    one lot are independent events, which is what dates a backdated buy."""
     events: list[Event] = []
     for flow in flows:
         verb = "Deposit" if flow.direction == DEPOSIT else "Withdrawal"
@@ -123,6 +139,7 @@ def ledger_events(
             date=flow.date,
             seq=flow.seq,
             delta=flow.delta,
+            kind=flow.direction,
             title=verb,
             label=f"{verb} of {_money(flow.amount)}",
         ))
@@ -131,8 +148,10 @@ def ledger_events(
             date=lot.buy_date,
             seq=lot.buy_seq,
             delta=-lot.money_in,
+            kind=BUY,
             title=f"Buy {lot.ticker}",
             label=f"Buy {lot.ticker} for {_money(lot.money_in)}",
+            subject=lot.ticker,
         ))
         if lot.is_sold and not is_unresolved_sale(lot):
             events.append(Event(
@@ -141,10 +160,59 @@ def ledger_events(
                 date=lot.sell_date or lot.buy_date,
                 seq=lot.sell_seq if lot.sell_seq is not None else lot.buy_seq,
                 delta=float(lot.money_out),
+                kind=SELL,
                 title=f"Sell {lot.ticker}",
                 label=f"Sale of {lot.ticker} for {_money(lot.money_out)}",
+                subject=lot.ticker,
             ))
     events.sort(key=lambda e: (e.date, e.seq))
+    return events
+
+
+def ledger_events(
+    lots: Sequence[Lot], flows: Sequence[CashFlow], *, autofund: bool = True
+) -> list[Event]:
+    """Every cash movement, with the deposits the user never had to type.
+
+    A buy spends the cash on hand. If that is not enough, the shortfall could
+    only have come from outside the account, so it is recorded as a deposit
+    dated on the buy — this is `autofund`. The user is never asked to deposit
+    before buying, and never has to think about the order they entered things.
+
+    The crucial property is that cash is spent *before* new capital is
+    invented. A buy funded by an earlier sale finds the proceeds waiting and
+    creates no deposit, so reinvested profit is never miscounted as money from
+    the bank. That is precisely the guarantee the old "deposit first" rule
+    bought, obtained without the friction.
+
+    Only buys autofund. Withdrawing cash you do not have is not a shortfall to
+    be covered, it is a mistake — `validate` refuses it.
+
+    Nothing here is persisted: the inferred deposits are recomputed on every
+    replay, so editing or removing a lot can never strand one behind. This is
+    the same reason the cash balance is derived rather than stored.
+    """
+    if not autofund:
+        return _recorded_events(lots, flows)
+
+    events: list[Event] = []
+    balance = 0.0
+    for event in _recorded_events(lots, flows):
+        if event.kind == BUY:
+            shortfall = -(balance + event.delta)
+            if shortfall > EPS:
+                events.append(Event(
+                    date=event.date,
+                    seq=event.seq,   # sorted already; sits just before the buy
+                    delta=shortfall,
+                    kind=AUTOFUND,
+                    title=f"Deposit (funds {event.subject})",
+                    label=f"Deposit of {_money(shortfall)} to fund {event.subject}",
+                    subject=event.subject,
+                ))
+                balance += shortfall
+        events.append(event)
+        balance += event.delta
     return events
 
 
@@ -169,18 +237,17 @@ def validate(lots: Sequence[Lot], flows: Sequence[CashFlow]) -> str | None:
     """Replay the *prospective* ledger and name the first transaction that
     drives cash negative, or return None if it never does.
 
-    Callers build the state they are about to commit — with the new event
-    inserted, or the removed one dropped — and refuse the action on a message.
-    Because a backdated buy shifts every later balance down, the offending
-    transaction is often not the one the user just entered; saying which one
-    broke is the difference between a usable error and a baffling one.
+    Since buys autofund, the only event that can now overdraw is a withdrawal
+    — you cannot take out cash that is not there, and unlike a purchase there
+    is nothing to infer. Callers build the state they are about to commit and
+    refuse the action on a message.
     """
     for event, balance in replay(ledger_events(lots, flows)):
         if balance < -EPS:
             return (
                 f"{event.label} on {event.date} would overdraw the account "
-                f"by {_money(-balance)}. Deposit more cash first, or change "
-                f"an earlier transaction."
+                f"by {_money(-balance)}. There is not that much cash in the "
+                f"account on that date."
             )
     return None
 
@@ -197,11 +264,17 @@ def compute_real_pnl(
     Kept free of DataFetcher on purpose — the caller has already priced the
     positions, and the five validation scenarios need no prices at all.
     """
-    deposited = sum(f.amount for f in flows if f.direction == DEPOSIT)
+    # money the user typed, plus money the app inferred had to come from
+    # outside to fund a purchase — both are external capital, and the return
+    # must be measured against the sum
+    events = ledger_events(lots, flows)
+    auto_funded = sum(e.delta for e in events if e.kind == AUTOFUND)
+    deposited = sum(f.amount for f in flows if f.direction == DEPOSIT) + auto_funded
     withdrawn = sum(f.amount for f in flows if f.direction == WITHDRAWAL)
     net_external = deposited - withdrawn
 
-    cash = current_cash(lots, flows)
+    trail = replay(events)
+    cash = trail[-1][1] if trail else 0.0
     positions_value = sum(
         float(open_worth.get(i, 0.0))
         for i, lot in enumerate(lots)
@@ -225,6 +298,7 @@ def compute_real_pnl(
         real_net_profit=float(real_net_profit),
         real_return_pct=real_return_pct,
         unresolved_sales=sum(1 for lot in lots if is_unresolved_sale(lot)),
+        auto_funded=float(auto_funded),
     )
 
 

@@ -97,7 +97,9 @@ _STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
 DISCLAIMER = (
     "Real-position tracker — open lots are valued from ~15-min-delayed closes; "
     "sold lots are frozen at the close on the day you sold, so their return "
-    "never moves again. Buying spends cash, so deposit before you buy."
+    "never moves again. Buying spends any cash you hold; whatever it falls "
+    "short by is recorded as money you put in. Deposit only to record cash you "
+    "transferred in but have not invested."
 )
 
 
@@ -169,14 +171,15 @@ class InvestmentDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        if self._editing:
-            note = QLabel(
-                "Changing the amount or the buy date moves this transaction in "
-                "the cash ledger; the edit is refused if it would overdraw the "
-                "account on any later day."
-            )
-            note.setWordWrap(True)
-            layout.addWidget(note)
+        note = QLabel(
+            "Any part of this the cash in your account can't cover is recorded "
+            "as money you put in, dated on the buy."
+            if edit is None else
+            "Changing the amount or the buy date moves this transaction in the "
+            "cash ledger, so what counts as money you put in may change."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
         layout.addWidget(buttons)
 
     def _on_sold_toggled(self, checked: bool) -> None:
@@ -359,7 +362,11 @@ class RealInvestmentPanel(QGroupBox):
         cash-flow log, which needs no prices. Only the rows derived from
         account value depend on the market."""
         plain = lambda v: f"${v:,.2f}"  # noqa: E731 — these can't be negative
-        self._values["deposited"].setText(plain(r.total_deposited))
+        deposited = plain(r.total_deposited)
+        if r.auto_funded > 0:
+            # never let an inferred figure masquerade as one the user typed
+            deposited += f"  (incl. {plain(r.auto_funded)} from your buys)"
+        self._values["deposited"].setText(deposited)
         self._values["withdrawn"].setText(plain(r.total_withdrawn))
         self._values["net_external"].setText(plain(r.net_external))
 
@@ -589,11 +596,12 @@ class InvestmentsPanel(QWidget):
             buy_seq=seq,
             sell_seq=seq + 1 if sell is not None else None,
         )
-        # a buy spends cash that must already be there; the user deposits first.
-        # This is what forces reinvested profits through the cash balance
-        # instead of being miscounted as fresh external capital.
+        # a buy spends cash on hand first and infers a deposit for the rest, so
+        # it cannot fail — reinvested profits are consumed before any new
+        # external capital is invented. The check stays for withdrawals, which
+        # are the only event that can still overdraw.
         error = validate(self._lots + [lot], self._flows)
-        if error is not None:
+        if error is not None:  # pragma: no cover - buys autofund
             self._refuse("Not enough cash", error)
             return
         already_validated = any(
@@ -613,8 +621,8 @@ class InvestmentsPanel(QWidget):
         on the books, and editing its cost basis would rewrite it.
 
         Raising `money_in`, or moving `buy_date` earlier, debits the ledger
-        harder or sooner and can overdraw a later day — so the prospective lot
-        list is replayed before anything is mutated.
+        harder or sooner. That cannot fail — a buy funds itself — but it does
+        change how much capital is inferred, so the panel is recomputed.
         """
         if lot.is_sold:  # pragma: no cover - the button is disabled
             self._refuse(
