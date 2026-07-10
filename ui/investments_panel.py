@@ -53,6 +53,7 @@ from portfolio.cash import (
     WITHDRAWAL,
     CashFlow,
     compute_real_pnl,
+    funding_breakdown,
     ledger_events,
     next_seq,
     replay,
@@ -83,11 +84,11 @@ from ui.detail_panel import DetailPanel
 log = logging.getLogger(__name__)
 
 COLS = (
-    "Ticker", "Put in", "Bought", "Trend", "Worth / Out", "P&L", "Return",
-    "/yr", "Risk", "Max DD", "Signal", "Sell", "", "",
+    "Ticker", "Put in", "Funded", "Bought", "Trend", "Worth / Out", "P&L",
+    "Return", "/yr", "Risk", "Max DD", "Signal", "Sell", "", "",
 )
 (
-    C_TICKER, C_IN, C_BOUGHT, C_TREND, C_WORTH, C_PNL, C_RETURN,
+    C_TICKER, C_IN, C_FUNDED, C_BOUGHT, C_TREND, C_WORTH, C_PNL, C_RETURN,
     C_YR, C_RISK, C_MAXDD, C_SIGNAL, C_SELL, C_EDIT, C_REMOVE,
 ) = range(len(COLS))
 
@@ -434,6 +435,115 @@ class RealInvestmentPanel(QGroupBox):
             )
 
 
+class ProfitReportDialog(QDialog):
+    """Two truths about the same portfolio, kept deliberately apart.
+
+    The top line is the overall profit — account value minus the money that
+    actually came from your bank. The table below breaks it down per position:
+    what each cost, whether it was bought with your money or with proceeds
+    recycled from an earlier sale, what it is worth now, and its profit or loss.
+
+    The footer shows reinvested proceeds and net profit on their own lines and
+    never adds them. Reinvestment is a flow of money through the account, not a
+    gain; the profit total already reflects every reinvested dollar that was
+    later won or lost, so summing the two would count the same money twice.
+    """
+
+    _COLS = ("Position", "Cost", "Funded by", "Value now", "P&L")
+
+    def __init__(self, parent, results, funding, pnl) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Profit report")
+        self.setModal(True)
+        self.resize(560, 420)
+        layout = QVBoxLayout(self)
+
+        # -- overall (the same figure the Real Investment panel shows live)
+        headline = QLabel(f"Real net profit: {money(pnl.real_net_profit)}")
+        colour = GREEN if pnl.real_net_profit >= 0 else RED
+        headline.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {colour.name()};"
+        )
+        layout.addWidget(headline)
+        sub = QLabel(
+            f"Account value ${pnl.account_value:,.2f}  −  money you put in "
+            f"${pnl.net_external:,.2f}"
+            + (f"   ({pnl.real_return_pct:+.1f}%)"
+               if pnl.real_return_pct is not None else "")
+        )
+        sub.setStyleSheet(f"color: {GREY.name()};")
+        layout.addWidget(sub)
+
+        # -- per-position breakdown
+        table = QTableWidget(len(results), len(self._COLS))
+        table.setHorizontalHeaderLabels(self._COLS)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        reinvested = 0.0
+        pnl_total = 0.0
+        priced = True
+        for r, (res, fund) in enumerate(zip(results, funding)):
+            lot = res.lot
+            table.setItem(r, 0, QTableWidgetItem(lot.ticker))
+            table.setItem(r, 1, QTableWidgetItem(f"${lot.money_in:,.0f}"))
+
+            if fund is None:
+                funded = "—"
+            elif fund.source == "Own":
+                funded = "your money"
+            elif fund.source == "Proceeds":
+                funded = "from proceeds"
+                reinvested += fund.from_proceeds
+            else:
+                funded = f"${fund.from_own:,.0f} own + ${fund.from_proceeds:,.0f} proc."
+                reinvested += fund.from_proceeds
+            table.setItem(r, 2, QTableWidgetItem(funded))
+
+            if res.error is not None or res.worth is None:
+                table.setItem(r, 3, QTableWidgetItem("no data"))
+                table.setItem(r, 4, QTableWidgetItem("—"))
+                priced = False
+                continue
+            table.setItem(r, 3, QTableWidgetItem(f"${res.worth:,.0f}"))
+            pnl_item = QTableWidgetItem(money(res.pnl))
+            pnl_item.setForeground(GREEN if res.pnl >= 0 else RED)
+            table.setItem(r, 4, pnl_item)
+            pnl_total += res.pnl
+        layout.addWidget(table, 1)
+
+        # -- footer: two separate lines, never summed
+        reinv = QLabel(f"Reinvested proceeds (money recycled through positions): "
+                       f"${reinvested:,.0f}")
+        reinv.setStyleSheet(f"color: {GREY.name()};")
+        reinv.setWordWrap(True)
+        layout.addWidget(reinv)
+
+        net = QLabel(
+            f"Net profit across positions: {money(pnl_total)}"
+            + ("" if priced else "   (excludes positions with no price data)")
+        )
+        net.setStyleSheet("font-weight: bold;")
+        layout.addWidget(net)
+
+        note = QLabel(
+            "Reinvested proceeds is how much money has cycled through your "
+            "positions, not a gain — it is not added to your profit. The profit "
+            "already includes every reinvested dollar that was later won or lost."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {GREY.name()}; font-size: 11px;")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class InvestmentsWorker(QObject):
     finished = pyqtSignal(object)  # InvestmentReport
     failed = pyqtSignal(str)
@@ -486,6 +596,8 @@ class InvestmentsPanel(QWidget):
         self._undo_btn.clicked.connect(self._on_undo)
         self._reset_btn = QPushButton("Reset…")
         self._reset_btn.clicked.connect(self._on_reset)
+        report_btn = QPushButton("Profit report…")
+        report_btn.clicked.connect(self._on_report_dialog)
         # cash is now a first-class concept: a buy spends it, a sale refills it
         self._cash_label = QLabel("")
         self._cash_label.setStyleSheet("font-weight: bold;")
@@ -495,6 +607,7 @@ class InvestmentsPanel(QWidget):
         add_row.addWidget(withdraw_btn)
         add_row.addWidget(self._undo_btn)
         add_row.addWidget(self._reset_btn)
+        add_row.addWidget(report_btn)
         add_row.addStretch(1)
         add_row.addWidget(self._cash_label)
 
@@ -659,6 +772,40 @@ class InvestmentsPanel(QWidget):
         if not self._lots:
             self._render_empty()
             self._status.setText(f"Undid: {snapshot.label}")
+
+    def _on_report_dialog(self) -> None:
+        if not self._lots:
+            self._refuse("Nothing to report", "Add an investment first.")
+            return
+        if self._report is None:
+            self._refuse(
+                "Still valuing",
+                "The positions are still being priced — try again in a moment.",
+            )
+            return
+        # align each result with its funding by lot identity; the report's rows
+        # are in self._lots order, but never assume it
+        fb = {
+            id(self._lots[f.index]): f
+            for f in funding_breakdown(self._lots, self._flows).values()
+            if 0 <= f.index < len(self._lots)
+        }
+        results = self._report.results
+        funding = [fb.get(id(res.lot)) for res in results]
+        worth = {
+            i: res.worth
+            for i, res in enumerate(results)
+            if res.error is None and res.worth is not None
+        }
+        # recompute against exactly these results, so the headline matches
+        open_worth = {
+            i: worth[j]
+            for i, lot in enumerate(self._lots)
+            for j, res in enumerate(results)
+            if res.lot is lot and j in worth
+        }
+        pnl = compute_real_pnl(self._lots, self._flows, open_worth)
+        ProfitReportDialog(self, results, funding, pnl).exec()
 
     def _on_reset(self) -> None:
         if not self._lots and not self._flows:
@@ -1036,11 +1183,19 @@ class InvestmentsPanel(QWidget):
 
     def _render(self, report: InvestmentReport) -> None:
         self._status.setText("")
+        # how each lot was paid for, keyed by the lot object so it survives the
+        # report's ordering (funding_breakdown keys by index into self._lots)
+        funding = {
+            id(self._lots[f.index]): f
+            for f in funding_breakdown(self._lots, self._flows).values()
+            if 0 <= f.index < len(self._lots)
+        }
         self._table.setRowCount(len(report.results))
         for i, res in enumerate(report.results):
             lot = res.lot
             self._set_item(i, C_TICKER, lot.ticker)
             self._set_item(i, C_IN, f"${lot.money_in:,.0f}")
+            self._set_funded_item(i, funding.get(id(lot)))
             bought = lot.buy_date
             if lot.is_sold:
                 bought += f" → {lot.sell_date or '?'}"
@@ -1152,6 +1307,19 @@ class InvestmentsPanel(QWidget):
 
     def _set_item(self, row: int, col: int, text: str) -> None:
         self._table.setItem(row, col, QTableWidgetItem(text))
+
+    def _set_funded_item(self, row: int, f) -> None:
+        """Own / Proceeds / Mixed, with the exact dollar split on hover."""
+        if f is None:
+            self._set_item(row, C_FUNDED, "—")
+            return
+        item = QTableWidgetItem(f.source)
+        if f.source == "Proceeds":
+            item.setForeground(GREEN)   # bought entirely with gains realized earlier
+        item.setToolTip(
+            f"${f.from_own:,.0f} your money  +  ${f.from_proceeds:,.0f} from proceeds"
+        )
+        self._table.setItem(row, C_FUNDED, item)
 
     def _on_selection(self) -> None:
         if self._report is None:

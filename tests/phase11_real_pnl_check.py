@@ -21,6 +21,7 @@ from portfolio.cash import (
     RealPnL,
     compute_real_pnl,
     current_cash,
+    funding_breakdown,
     ledger_events,
     replay,
     validate,
@@ -375,6 +376,53 @@ def scenarios_reproduce_with_no_deposits_at_all() -> None:
     print("  -> only the first $2,000 was inferred; both reinvestments were free")
 
 
+def funding_splits_own_from_recycled_proceeds() -> None:
+    """Each purchase splits into fresh external money and recycled proceeds,
+    with no fungibility convention. Proceeds are spent before idle cash."""
+    # Scenario 4, no deposits: only A is external; B and C ride on proceeds
+    lots = [
+        Lot("A", 2000.0, "2026-01-05", money_out=5000.0, sell_date="2026-03-01",
+            buy_seq=1, sell_seq=2),
+        Lot("B", 3000.0, "2026-03-02", money_out=4000.0, sell_date="2026-05-01",
+            buy_seq=3, sell_seq=4),
+        Lot("C", 5000.0, "2026-05-02", buy_seq=5),
+    ]
+    fb = funding_breakdown(lots, [])
+    assert (fb[0].from_own, fb[0].from_proceeds) == (2000.0, 0.0)
+    assert (fb[1].from_own, fb[1].from_proceeds) == (0.0, 3000.0)
+    assert (fb[2].from_own, fb[2].from_proceeds) == (0.0, 5000.0)
+    assert fb[0].source == "Own" and fb[1].source == "Proceeds"
+    reinvested = sum(f.from_proceeds for f in fb.values())
+    assert reinvested == 8000.0, reinvested
+    # each lot's split sums to its cost
+    for f in fb.values():
+        assert abs(f.from_own + f.from_proceeds - f.cost) < TOL
+    print(f"funding split OK: ${reinvested:,.0f} reinvested, $2,000 external")
+
+
+def idle_deposit_is_own_money_not_proceeds() -> None:
+    """Spending cash you deposited but never invested must read as your money,
+    even though it sits in the same pool sales would land in."""
+    flows = [_flow(10_000, DEPOSIT, "2026-01-02", 0)]
+    lots = [Lot("A", 2000.0, "2026-01-05", buy_seq=1)]
+    fb = funding_breakdown(lots, flows)
+    assert (fb[0].from_own, fb[0].from_proceeds) == (2000.0, 0.0)
+    assert fb[0].source == "Own"
+
+    # a mixed buy: $500 idle left, rest from a $3,000 sale
+    lots = [
+        Lot("A", 9500.0, "2026-01-05", money_out=3000.0, sell_date="2026-02-01",
+            buy_seq=1, sell_seq=2),
+        Lot("B", 3200.0, "2026-02-02", buy_seq=3),
+    ]
+    fb = funding_breakdown(lots, flows)
+    # after A: idle 500 (10000 - 9500), then A sells -> proceeds 3000.
+    # B $3,200 spends 3000 proceeds first, then 200 idle.
+    assert (fb[1].from_proceeds, fb[1].from_own) == (3000.0, 200.0)
+    assert fb[1].source == "Mixed"
+    print("idle deposit reads as own money; proceeds spent first")
+
+
 def ledger_rows_read_as_a_statement() -> None:
     """The transactions table in the UI renders replay() directly, so the event
     order, titles and running balance are load-bearing, not cosmetic."""
@@ -466,6 +514,8 @@ NEGATIVE_PATHS = (
     unresolved_sale_understates_cash,
     no_external_capital_has_no_return_pct,
     same_date_events_replay_in_entry_order,
+    funding_splits_own_from_recycled_proceeds,
+    idle_deposit_is_own_money_not_proceeds,
     ledger_rows_read_as_a_statement,
     document_roundtrip_and_v2_upgrade,
 )

@@ -114,6 +114,32 @@ class RealPnL:
     auto_funded: float               # of total_deposited, how much was inferred
 
 
+@dataclass(slots=True, eq=False)
+class LotFunding:
+    """How one purchase was paid for, split with no fungibility convention.
+
+    `from_own` is money that came from outside — idle cash you deposited, plus
+    any shortfall auto-funded on the buy. `from_proceeds` is money recycled
+    from an earlier sale. They sum to the lot's cost. The split is exact: a buy
+    is assumed to spend sale proceeds before idle deposited cash (proceeds
+    first), which is the only assumption needed and the one that reads
+    correctly when idle deposited cash is present.
+    """
+    index: int              # position in the lots sequence it was built from
+    ticker: str
+    cost: float             # == money_in == from_own + from_proceeds
+    from_own: float
+    from_proceeds: float
+
+    @property
+    def source(self) -> str:
+        if self.from_proceeds <= EPS:
+            return "Own"
+        if self.from_own <= EPS:
+            return "Proceeds"
+        return "Mixed"
+
+
 def _money(v: float) -> str:
     return f"${v:,.2f}"
 
@@ -300,6 +326,62 @@ def compute_real_pnl(
         unresolved_sales=sum(1 for lot in lots if is_unresolved_sale(lot)),
         auto_funded=float(auto_funded),
     )
+
+
+def funding_breakdown(
+    lots: Sequence[Lot], flows: Sequence[CashFlow]
+) -> dict[int, LotFunding]:
+    """Split each purchase into money from outside vs money recycled from an
+    earlier sale, keyed by the lot's index.
+
+    A buy spends sale proceeds first, then idle deposited cash, then whatever
+    is still short is auto-funded from outside. So `from_proceeds` is money
+    that had already been through a position, and `from_own` is fresh external
+    capital — the distinction the "Funded by" column reports, and the one the
+    profit report totals as reinvested proceeds. No principal-vs-profit
+    convention is involved: proceeds are proceeds, whatever their make-up.
+    """
+    events = []
+    for f in flows:
+        events.append((f.date, f.seq, f.direction, f.amount, -1))
+    for i, lot in enumerate(lots):
+        events.append((lot.buy_date, lot.buy_seq, BUY, lot.money_in, i))
+        if lot.is_sold and not is_unresolved_sale(lot):
+            events.append((
+                lot.sell_date or lot.buy_date,
+                lot.sell_seq if lot.sell_seq is not None else lot.buy_seq,
+                SELL, float(lot.money_out), i,
+            ))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    idle = 0.0       # deposited cash not yet spent
+    proceeds = 0.0   # cash returned by sales, waiting to be redeployed
+    out: dict[int, LotFunding] = {}
+    for _date, _seq, kind, amount, idx in events:
+        if kind == DEPOSIT:
+            idle += amount
+        elif kind == WITHDRAWAL:
+            # taking your money back out comes off idle deposits first
+            take = min(amount, idle)
+            idle -= take
+            proceeds -= amount - take
+        elif kind == SELL:
+            proceeds += amount
+        elif kind == BUY:
+            from_proceeds = min(amount, proceeds)
+            proceeds -= from_proceeds
+            rest = amount - from_proceeds
+            from_idle = min(rest, idle)
+            idle -= from_idle
+            from_autofund = rest - from_idle   # the shortfall, sourced outside
+            out[idx] = LotFunding(
+                index=idx,
+                ticker=lots[idx].ticker,
+                cost=float(amount),
+                from_own=float(from_idle + from_autofund),
+                from_proceeds=float(from_proceeds),
+            )
+    return out
 
 
 def next_seq(lots: Sequence[Lot], flows: Sequence[CashFlow]) -> int:
