@@ -15,6 +15,7 @@ import pandas as pd
 import paths
 from data.fetcher import DataFetcher
 from portfolio.tracker import (
+    INVESTMENTS_VERSION,
     Lot,
     analyze_investments,
     load_investments,
@@ -225,7 +226,7 @@ def persistence_roundtrip_and_corruption() -> None:
         ]
         save_investments(lots, p)
         assert load_investments(p) == lots, "round-trip must preserve strategy"
-        assert json.loads(p.read_text())["version"] == 2
+        assert json.loads(p.read_text())["version"] == INVESTMENTS_VERSION
         p.write_text("{ nope", encoding="utf-8")
         assert load_investments(p) == []
         assert p.with_suffix(".json.bak").exists()

@@ -7,6 +7,12 @@ sold, keeping the return they had earned and staying on the books. Same
 worker/pending-validation architecture as the paper-portfolio panel: all
 fetching happens on a QThread, and a new ticker is only persisted after a
 worker report proves Yahoo knows it.
+
+The account also holds uninvested cash. Buying spends it, selling refills it,
+and it only grows from outside via an explicit Deposit — so a position funded
+by reinvested profits can never be mistaken for fresh money from the user's
+bank. That distinction is what the Real Investment panel reports on; the maths
+lives in portfolio/cash.py.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -38,12 +45,20 @@ from PyQt6.QtWidgets import (
 
 import paths
 from data.fetcher import DataFetcher
+from portfolio.cash import (
+    DEPOSIT,
+    WITHDRAWAL,
+    CashFlow,
+    compute_real_pnl,
+    next_seq,
+    validate,
+)
 from portfolio.tracker import (
     InvestmentReport,
     Lot,
     Totals,
     analyze_investments,
-    load_investments,
+    load_investments_doc,
     looks_transient,
     save_investments,
 )
@@ -74,7 +89,7 @@ _STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
 DISCLAIMER = (
     "Real-position tracker — open lots are valued from ~15-min-delayed closes; "
     "sold lots are frozen at the close on the day you sold, so their return "
-    "never moves again."
+    "never moves again. Buying spends cash, so deposit before you buy."
 )
 
 
@@ -198,6 +213,133 @@ class SellDialog(QDialog):
         return self._sell_date.date().toPyDate()
 
 
+class CashFlowDialog(QDialog):
+    """Money moving between the user's bank and the account. This is the only
+    place external capital is recorded, so it is the only thing Real Net Profit
+    measures the account against."""
+
+    def __init__(self, parent, direction: str) -> None:
+        super().__init__(parent)
+        self._direction = direction
+        depositing = direction == DEPOSIT
+        verb = "Deposit" if depositing else "Withdraw"
+        self.setWindowTitle(verb)
+        self.setModal(True)
+
+        today = QDate.currentDate()
+        self._amount = QDoubleSpinBox()
+        self._amount.setRange(0.01, 100_000_000.0)
+        self._amount.setDecimals(2)
+        self._amount.setPrefix("$ ")
+        self._amount.setGroupSeparatorShown(True)
+        self._amount.setValue(1000.0)
+        self._date = QDateEdit(today)
+        self._date.setCalendarPopup(True)
+        self._date.setMaximumDate(today)
+
+        form = QFormLayout()
+        form.addRow("Amount", self._amount)
+        form.addRow("On", self._date)
+
+        note = QLabel(
+            "Money in from your bank. It sits as cash until you buy something."
+            if depositing else
+            "Money out to your bank. It leaves the account for good."
+        )
+        note.setWordWrap(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[float, date]:
+        return float(self._amount.value()), self._date.date().toPyDate()
+
+
+class RealInvestmentPanel(QGroupBox):
+    """How much the user is up on the money they actually deposited.
+
+    Deliberately separate from the summary strip above it: that one measures
+    the positions, this one measures the account. They report the same profit
+    (see portfolio/cash.py) but different denominators, and the difference is
+    the whole point.
+    """
+
+    _ROWS = (
+        ("deposited", "Total deposited"),
+        ("withdrawn", "Total withdrawn"),
+        ("net_external", "Net external capital"),
+        ("account_value", "Current account value"),
+        ("profit", "Real net profit"),
+        ("return_pct", "Real return"),
+    )
+
+    def __init__(self) -> None:
+        super().__init__("Real Investment")
+        self._values: dict[str, QLabel] = {}
+        self._labels: dict[str, QLabel] = {}
+        form = QFormLayout(self)
+        for key, caption in self._ROWS:
+            label = QLabel(caption)
+            value = QLabel("—")
+            self._labels[key] = label
+            self._values[key] = value
+            form.addRow(label, value)
+        self._values["profit"].setStyleSheet("font-weight: bold;")
+
+    def clear(self) -> None:
+        for value in self._values.values():
+            value.setText("—")
+            value.setStyleSheet("")
+        self._values["profit"].setStyleSheet("font-weight: bold;")
+        self._set_return_visible(False)
+
+    def _set_return_visible(self, visible: bool) -> None:
+        self._labels["return_pct"].setVisible(visible)
+        self._values["return_pct"].setVisible(visible)
+
+    def show_pnl(self, r, priced: bool) -> None:
+        """`priced` is False while any open position lacks a market value — a
+        sale still awaiting its close, or a ticker Yahoo would not return. The
+        external-capital rows are exact regardless; the rows derived from
+        account value are withheld rather than shown short."""
+        plain = lambda v: f"${v:,.2f}"  # noqa: E731 — these can't be negative
+        self._values["deposited"].setText(plain(r.total_deposited))
+        self._values["withdrawn"].setText(plain(r.total_withdrawn))
+        self._values["net_external"].setText(plain(r.net_external))
+
+        if not priced:
+            for key in ("account_value", "profit", "return_pct"):
+                self._values[key].setText("valuing…")
+                self._values[key].setStyleSheet("")
+            self._values["profit"].setStyleSheet("font-weight: bold;")
+            self._set_return_visible(True)
+            return
+
+        self._values["account_value"].setText(plain(r.account_value))
+
+        profit = self._values["profit"]
+        profit.setText(money(r.real_net_profit))
+        colour = GREEN if r.real_net_profit >= 0 else RED
+        # QTableWidgetItem.setForeground doesn't exist on QLabel
+        profit.setStyleSheet(f"font-weight: bold; color: {colour.name()};")
+
+        # a return on zero or negative capital is meaningless, not infinite
+        show_return = r.real_return_pct is not None
+        self._set_return_visible(show_return)
+        if show_return:
+            value = self._values["return_pct"]
+            value.setText(f"{r.real_return_pct:+.1f}%")
+            value.setStyleSheet(f"color: {colour.name()};")
+
+
 class InvestmentsWorker(QObject):
     finished = pyqtSignal(object)  # InvestmentReport
     failed = pyqtSignal(str)
@@ -228,7 +370,7 @@ class InvestmentsWorker(QObject):
 class InvestmentsPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self._lots: list[Lot] = load_investments()
+        self._lots, self._flows = load_investments_doc()
         self._report: InvestmentReport | None = None
         self._thread: QThread | None = None
         self._worker: InvestmentsWorker | None = None
@@ -241,9 +383,19 @@ class InvestmentsPanel(QWidget):
 
         add_btn = QPushButton("Add investment…")
         add_btn.clicked.connect(self._on_new_investment)
+        deposit_btn = QPushButton("Deposit…")
+        deposit_btn.clicked.connect(lambda: self._on_cash_flow(DEPOSIT))
+        withdraw_btn = QPushButton("Withdraw…")
+        withdraw_btn.clicked.connect(lambda: self._on_cash_flow(WITHDRAWAL))
+        # cash is now a first-class concept: a buy spends it, a sale refills it
+        self._cash_label = QLabel("")
+        self._cash_label.setStyleSheet("font-weight: bold;")
         add_row = QHBoxLayout()
         add_row.addWidget(add_btn)
+        add_row.addWidget(deposit_btn)
+        add_row.addWidget(withdraw_btn)
         add_row.addStretch(1)
+        add_row.addWidget(self._cash_label)
 
         self._table = QTableWidget(0, len(COLS))
         self._table.setHorizontalHeaderLabels(COLS)
@@ -264,6 +416,7 @@ class InvestmentsPanel(QWidget):
         self._summary_open = QLabel("")
         self._summary_open.setWordWrap(True)
         self._status = QLabel("")
+        self._real = RealInvestmentPanel()
         self._note = QLabel(DISCLAIMER)
         self._note.setWordWrap(True)
 
@@ -272,6 +425,7 @@ class InvestmentsPanel(QWidget):
         left_layout.addWidget(self._table, 1)
         left_layout.addWidget(self._summary)
         left_layout.addWidget(self._summary_open)
+        left_layout.addWidget(self._real)
         left_layout.addWidget(self._status)
         left_layout.addWidget(self._note)
         left = QWidget()
@@ -331,10 +485,13 @@ class InvestmentsPanel(QWidget):
     def _persist(self) -> None:
         keep = [lot for lot in self._lots if lot.ticker not in self._pending]
         try:
-            save_investments(keep)
+            save_investments(keep, cash_flows=self._flows)
         except OSError as e:
             log.exception("investments save failed")
             self._status.setText(f"WARNING: investments not saved: {e}")
+
+    def _refuse(self, title: str, message: str) -> None:
+        QMessageBox.warning(self, title, message)
 
     def _on_new_investment(self) -> None:
         dialog = InvestmentDialog(self)
@@ -343,13 +500,23 @@ class InvestmentsPanel(QWidget):
         ticker, money_in, buy, strategy, sell = dialog.values()
         if not ticker:
             return
+        seq = next_seq(self._lots, self._flows)
         lot = Lot(
             ticker=ticker,
             money_in=money_in,
             buy_date=buy.isoformat(),
             sell_date=sell.isoformat() if sell is not None else None,
             strategy=strategy,
+            buy_seq=seq,
+            sell_seq=seq + 1 if sell is not None else None,
         )
+        # a buy spends cash that must already be there; the user deposits first.
+        # This is what forces reinvested profits through the cash balance
+        # instead of being miscounted as fresh external capital.
+        error = validate(self._lots + [lot], self._flows)
+        if error is not None:
+            self._refuse("Not enough cash", error)
+            return
         already_validated = any(
             l.ticker == ticker and l.ticker not in self._pending for l in self._lots
         )
@@ -361,9 +528,47 @@ class InvestmentsPanel(QWidget):
             self._persist()
         self.recompute()
 
+    def _on_cash_flow(self, direction: str) -> None:
+        dialog = CashFlowDialog(self, direction)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        amount, when = dialog.values()
+        flow = CashFlow(
+            amount=amount,
+            direction=direction,
+            date=when.isoformat(),
+            seq=next_seq(self._lots, self._flows),
+        )
+        error = validate(self._lots, self._flows + [flow])
+        if error is not None:
+            self._refuse("Not enough cash", error)
+            return
+        self._flows.append(flow)
+        self._persist()
+        # external cash moves no position, so nothing needs revaluing and the
+        # generation must not bump — that would discard an in-flight report
+        self._refresh_real()
+
     def _on_remove(self, lot: Lot) -> None:
+        if lot.is_sold:
+            # realized P&L is locked in: allowing a closed lot to be deleted
+            # would let a losing trade be erased to inflate Real Net Profit
+            self._refuse(
+                "Position already sold",
+                f"{lot.ticker} has been sold, so its result is on the books. "
+                f"Undo the sale first if you need to remove it.",
+            )
+            return
+        remaining = [l for l in self._lots if l is not lot]
+        # dropping an open lot only credits its money_in back, which raises
+        # every later balance — this can never actually reject. Kept as a
+        # defensive assertion; see tests/phase11_real_pnl_check.py.
+        error = validate(remaining, self._flows)
+        if error is not None:  # pragma: no cover - unreachable by construction
+            self._refuse("Cannot remove", error)
+            return
         self._generation += 1
-        self._lots = [l for l in self._lots if l is not lot]
+        self._lots = remaining
         if not any(l.ticker == lot.ticker for l in self._lots):
             self._pending.discard(lot.ticker)
         self._persist()
@@ -375,8 +580,32 @@ class InvestmentsPanel(QWidget):
             return
         self._generation += 1
         # the lot stays on the books; leaving money_out None makes the tracker
-        # value it at the close on this date, freezing the return it earned
+        # value it at the close on this date, freezing the return it earned.
+        # The worker resolves that close into money_out (see _on_report), which
+        # is the proceeds credited to cash — a sale only ever adds cash, so it
+        # needs no overdraft check.
         lot.sell_date = dialog.sell_date().isoformat()
+        lot.sell_seq = next_seq(self._lots, self._flows)
+        self._persist()
+        self.recompute()
+
+    def _on_undo_sell(self, lot: Lot) -> None:
+        """Reopen a sold lot. This withdraws the sale's credit, lowering every
+        later balance, so unlike Remove it genuinely can overdraw — a later buy
+        may have been funded by these proceeds."""
+        reopened = Lot(
+            ticker=lot.ticker, money_in=lot.money_in, buy_date=lot.buy_date,
+            strategy=lot.strategy, buy_seq=lot.buy_seq,
+        )
+        prospective = [reopened if l is lot else l for l in self._lots]
+        error = validate(prospective, self._flows)
+        if error is not None:
+            self._refuse("Cannot undo this sale", error)
+            return
+        self._generation += 1
+        lot.sell_date = None
+        lot.sell_seq = None
+        lot.money_out = None
         self._persist()
         self.recompute()
 
@@ -407,6 +636,7 @@ class InvestmentsPanel(QWidget):
                 self._lots = [l for l in self._lots if l.ticker != pending]
                 self._pending.discard(pending)
                 rejected.append((pending, errors[0]))
+        self._resolve_proceeds(report)
         self._persist()
         if rejected:
             QMessageBox.warning(
@@ -424,17 +654,65 @@ class InvestmentsPanel(QWidget):
             self._dirty = False
             self.recompute()
 
+    def _resolve_proceeds(self, report: InvestmentReport) -> None:
+        """Freeze a fresh sale's proceeds into `money_out`.
+
+        `SellDialog` runs on the UI thread and has no DataFetcher, so it cannot
+        price the sale itself. The worker already does: for a sold lot with no
+        money_out, `_analyze_lot` values it at the close on the sell date, and
+        that number *is* the proceeds. Writing it back makes the cash balance a
+        ledger — fixed once, immune to later price-cache refreshes — and leaves
+        tracker.py's valuation untouched, since it now takes its existing
+        `money_out is not None` branch and returns the identical figure.
+        """
+        for res in report.results:
+            lot = res.lot
+            if (
+                lot.sell_date is not None
+                and lot.money_out is None
+                and res.error is None
+                and res.worth is not None
+            ):
+                lot.money_out = float(res.worth)
+
     def _on_failed(self, err: str) -> None:
         self._teardown()
         if self._pending:
             self._lots = [l for l in self._lots if l.ticker not in self._pending]
             self._pending.clear()
         self._status.setText(f"Investment analysis failed: {err}")
+        self._refresh_real()
         if self._dirty:
             self._dirty = False
             self.recompute()
 
     # ------------------------------------------------------------ rendering
+
+    def _refresh_real(self) -> None:
+        """Cash balance and the Real Investment panel. Both read the ledger, so
+        they are correct the moment a deposit lands — no worker round-trip."""
+        worth_by_lot = {
+            id(res.lot): res.worth
+            for res in (self._report.results if self._report else ())
+            if res.error is None and res.worth is not None
+        }
+        open_worth = {
+            i: worth_by_lot[id(lot)]
+            for i, lot in enumerate(self._lots)
+            if id(lot) in worth_by_lot
+        }
+        r = compute_real_pnl(self._lots, self._flows, open_worth)
+
+        # cash needs no prices; only an unpriced sale can leave it unknown
+        if r.unresolved_sales:
+            self._cash_label.setText("Cash: valuing sale…")
+        else:
+            self._cash_label.setText(f"Cash: ${r.cash:,.2f}")
+
+        priced = not r.unresolved_sales and all(
+            id(lot) in worth_by_lot for lot in self._lots if not lot.is_sold
+        )
+        self._real.show_pnl(r, priced)
 
     def _render_empty(self) -> None:
         self._table.setRowCount(0)
@@ -444,6 +722,7 @@ class InvestmentsPanel(QWidget):
         )
         self._summary_open.setVisible(False)
         self._status.setText("")
+        self._refresh_real()
 
     def _render(self, report: InvestmentReport) -> None:
         self._status.setText("")
@@ -485,12 +764,22 @@ class InvestmentsPanel(QWidget):
                 sell_btn = QPushButton("Sell…")
                 sell_btn.clicked.connect(lambda _c, l=lot: self._on_sell(l))
                 self._table.setCellWidget(i, C_SELL, sell_btn)
+            elif lot.is_sold:
+                # the sale credited cash and froze the lot's return; undoing it
+                # is the only way back to an open position (and thence Remove)
+                undo_btn = QPushButton("Undo sale")
+                undo_btn.clicked.connect(lambda _c, l=lot: self._on_undo_sell(l))
+                self._table.setCellWidget(i, C_SELL, undo_btn)
             else:
                 # setItem alone never removes an existing cell widget — a
                 # leftover Sell button would silently rewrite recorded sales
                 self._table.removeCellWidget(i, C_SELL)
-                self._set_item(i, C_SELL, "Sold" if lot.is_sold else "")
+                self._set_item(i, C_SELL, "")
             remove_btn = QPushButton("Remove")
+            remove_btn.setEnabled(not lot.is_sold)
+            if lot.is_sold:
+                # realized P&L stays on the books; see _on_remove
+                remove_btn.setToolTip("Undo the sale first.")
             remove_btn.clicked.connect(lambda _c, l=lot: self._on_remove(l))
             self._table.setCellWidget(i, C_REMOVE, remove_btn)
 
@@ -519,8 +808,13 @@ class InvestmentsPanel(QWidget):
         for note in report.notes:
             text += f"\nNote: {note}"
         self._summary.setText(text)
+        self._refresh_real()
 
     def _totals_line(self, prefix: str, totals: Totals) -> str:
+        # FLAG (real-investment-pnl pass): "Put in" is sum(money_in), which
+        # counts every reinvestment of a previous sale. The user reads it as
+        # money deposited from their bank; it is not. Left as-is by request —
+        # the Real Investment panel below carries the honest figures.
         text = (
             f"{prefix} ({totals.count})  |  "
             f"Put in ${totals.total_in:,.0f}  |  "

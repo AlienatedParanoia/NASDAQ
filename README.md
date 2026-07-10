@@ -83,7 +83,12 @@ Each build phase has a runnable check under `tests/` (run from the repo root
 with `python -m tests.<name>`): `phase1_data_check`, `phase2_indicator_check`,
 `phase2_universe_check`, `phase3_backtest_check`, `phase4_signal_check`,
 `phase5_ui_smoke`, `phase7_investments_check`, `phase8_daily_report_check`,
-and `regression_review_fixes`.
+`phase9_paper_trading_check`, `phase10_paper_trading_smoke`,
+`phase11_real_pnl_check`, and `regression_review_fixes`.
+
+`phase11_real_pnl_check` is fully offline and covers the cash ledger and Real
+Investment P&L; its five scenarios also run inside `--selftest`, so a build
+cannot ship with that maths broken.
 
 ## Build the Windows exe
 

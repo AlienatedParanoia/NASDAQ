@@ -28,13 +28,14 @@ import pandas as pd
 import paths
 from classifier.classify import Bucket
 from data.fetcher import DataFetcher, FetchError, StockData
+from portfolio.cash import CashFlow
 from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
 from signals.signal_generator import ScanRow, Signal, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
 
 log = logging.getLogger(__name__)
 
-INVESTMENTS_VERSION = 2
+INVESTMENTS_VERSION = 3
 MIN_ANNUALIZE_DAYS = 30  # annualizing anything shorter is noise
 
 _RISK_CUTS = ((0.15, "Low"), (0.25, "Moderate"), (0.40, "High"))
@@ -64,6 +65,11 @@ class Lot:
     money_out: float | None = None   # explicit proceeds; None = value at the sell close
     sell_date: str | None = None     # set = position closed
     strategy: str | None = None      # a Bucket value string; None = recommended
+    # ordering within the cash ledger (portfolio/cash.py): the buy debits the
+    # balance, the sale credits it, and these break ties between events that
+    # share a date so a replay is stable across loads
+    buy_seq: int = 0
+    sell_seq: int | None = None
 
     @property
     def is_sold(self) -> bool:
@@ -71,13 +77,18 @@ class Lot:
         return self.sell_date is not None or self.money_out is not None
 
 
-def load_investments(path: Path | None = None) -> list[Lot]:
+def load_investments_doc(
+    path: Path | None = None,
+) -> tuple[list[Lot], list[CashFlow]]:
+    """The whole persisted document: the lots and the external cash flows that
+    funded them. A v2 file has no `cash_flows` key and no `seq` fields; both
+    default from list position, so it loads without migration."""
     path = path or paths.investments_path()
     raw = read_json_or_backup(path)
     if raw is None:
-        return []
+        return [], []
     try:
-        return [
+        lots = [
             Lot(
                 ticker=str(entry["ticker"]).upper(),
                 money_in=float(entry["money_in"]),
@@ -88,19 +99,43 @@ def load_investments(path: Path | None = None) -> list[Lot]:
                 ),
                 sell_date=entry.get("sell_date"),
                 strategy=entry.get("strategy"),
+                buy_seq=int(entry.get("buy_seq", i)),
+                sell_seq=(
+                    None if entry.get("sell_seq") is None
+                    else int(entry["sell_seq"])
+                ),
             )
-            for entry in raw["lots"]
+            for i, entry in enumerate(raw["lots"])
             if float(entry["money_in"]) > 0
         ]
+        flows = [
+            CashFlow(
+                amount=float(entry["amount"]),
+                direction=str(entry["direction"]),
+                date=str(entry["date"]),
+                seq=int(entry.get("seq", i)),
+            )
+            for i, entry in enumerate(raw.get("cash_flows", []))
+            if float(entry["amount"]) > 0
+        ]
+        return lots, flows
     except Exception:
         # structurally wrong but valid JSON: back it up too, or the next
         # save silently overwrites the user's data
         log.exception("investments file has unexpected structure; starting empty")
         backup_file(path)
-        return []
+        return [], []
 
 
-def save_investments(lots: Sequence[Lot], path: Path | None = None) -> None:
+def load_investments(path: Path | None = None) -> list[Lot]:
+    return load_investments_doc(path)[0]
+
+
+def save_investments(
+    lots: Sequence[Lot],
+    path: Path | None = None,
+    cash_flows: Sequence[CashFlow] = (),
+) -> None:
     path = path or paths.investments_path()
     write_json_atomic(path, {
         "version": INVESTMENTS_VERSION,
@@ -112,8 +147,19 @@ def save_investments(lots: Sequence[Lot], path: Path | None = None) -> None:
                 "money_out": lot.money_out,
                 "sell_date": lot.sell_date,
                 "strategy": lot.strategy,
+                "buy_seq": lot.buy_seq,
+                "sell_seq": lot.sell_seq,
             }
             for lot in lots
+        ],
+        "cash_flows": [
+            {
+                "amount": flow.amount,
+                "direction": flow.direction,
+                "date": flow.date,
+                "seq": flow.seq,
+            }
+            for flow in cash_flows
         ],
     })
 
@@ -278,6 +324,14 @@ def _aggregate(pairs: Sequence[tuple[LotResult, pd.Series]]) -> Totals | None:
     if not pairs:
         return None
 
+    # FLAG (real-investment-pnl pass): `total_in` sums every lot's money_in, so
+    # each reinvestment of a previous sale inflates it — the UI labels this
+    # "Put in", which reads as "deposited from my bank" and is not that. The
+    # derived `total_return` therefore divides a correct profit by a base the
+    # user never deposited. portfolio/cash.py computes the honest figures
+    # (net external capital, real return %); this view is left untouched
+    # pending review. Note `pnl` itself is correct and provably equals
+    # RealPnL.real_net_profit.
     total_in = float(sum(r.lot.money_in for r, _ in pairs))
     current_value = float(sum(r.worth for r, _ in pairs))
     pnl = current_value - total_in
