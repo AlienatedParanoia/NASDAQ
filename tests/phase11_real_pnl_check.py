@@ -291,6 +291,34 @@ def same_date_events_replay_in_entry_order() -> None:
     print("same-date events replay in entry order")
 
 
+def ledger_rows_read_as_a_statement() -> None:
+    """The transactions table in the UI renders replay() directly, so the event
+    order, titles and running balance are load-bearing, not cosmetic."""
+    flows = [
+        _flow(6000, DEPOSIT, "2026-01-02", 0),
+        _flow(1000, WITHDRAWAL, "2026-03-03", 4),
+    ]
+    lots = [
+        Lot("AAPL", 2000.0, "2026-01-05", money_out=5000.0, sell_date="2026-03-01",
+            buy_seq=1, sell_seq=2),
+        Lot("NVDA", 5000.0, "2026-03-02", buy_seq=3),
+    ]
+    rows = [
+        (e.date, e.title, e.delta, bal)
+        for e, bal in replay(ledger_events(lots, flows))
+    ]
+    assert rows == [
+        ("2026-01-02", "Deposit",    6000.0, 6000.0),
+        ("2026-01-05", "Buy AAPL",  -2000.0, 4000.0),
+        ("2026-03-01", "Sell AAPL",  5000.0, 9000.0),
+        ("2026-03-02", "Buy NVDA",  -5000.0, 4000.0),
+        ("2026-03-03", "Withdrawal", -1000.0, 3000.0),
+    ], rows
+    # the statement's closing balance is the cash balance, by construction
+    assert abs(rows[-1][3] - current_cash(lots, flows)) < TOL
+    print("ledger statement reads in order and closes on the cash balance")
+
+
 def document_roundtrip_and_v2_upgrade() -> None:
     """Cash flows survive a save/load, and a v2 file — which has no cash_flows
     key and no seq fields — loads with the seqs defaulted from list position."""
@@ -346,6 +374,7 @@ NEGATIVE_PATHS = (
     unresolved_sale_understates_cash,
     no_external_capital_has_no_return_pct,
     same_date_events_replay_in_entry_order,
+    ledger_rows_read_as_a_statement,
     document_roundtrip_and_v2_upgrade,
 )
 

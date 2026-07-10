@@ -70,11 +70,18 @@ class CashFlow:
 @dataclass(slots=True, eq=False)
 class Event:
     """One dated movement of the cash balance, from either a CashFlow or a
-    leg of a Lot. `label` is user-facing: it names the offending transaction
-    when a replay overdraws."""
+    leg of a Lot.
+
+    Two user-facing strings, because they are read in different places.
+    `title` is short ("Buy AAPL") for the transactions table, which carries the
+    amount in its own column. `label` embeds the amount ("Buy AAPL for
+    $2,000.00") so an overdraft message can name the offending transaction on
+    its own, without a table around it.
+    """
     date: str
     seq: int
     delta: float
+    title: str
     label: str
 
 
@@ -116,6 +123,7 @@ def ledger_events(
             date=flow.date,
             seq=flow.seq,
             delta=flow.delta,
+            title=verb,
             label=f"{verb} of {_money(flow.amount)}",
         ))
     for lot in lots:
@@ -123,6 +131,7 @@ def ledger_events(
             date=lot.buy_date,
             seq=lot.buy_seq,
             delta=-lot.money_in,
+            title=f"Buy {lot.ticker}",
             label=f"Buy {lot.ticker} for {_money(lot.money_in)}",
         ))
         if lot.is_sold and not is_unresolved_sale(lot):
@@ -132,6 +141,7 @@ def ledger_events(
                 date=lot.sell_date or lot.buy_date,
                 seq=lot.sell_seq if lot.sell_seq is not None else lot.buy_seq,
                 delta=float(lot.money_out),
+                title=f"Sell {lot.ticker}",
                 label=f"Sale of {lot.ticker} for {_money(lot.money_out)}",
             ))
     events.sort(key=lambda e: (e.date, e.seq))

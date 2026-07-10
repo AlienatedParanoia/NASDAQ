@@ -51,7 +51,9 @@ from portfolio.cash import (
     WITHDRAWAL,
     CashFlow,
     compute_real_pnl,
+    ledger_events,
     next_seq,
+    replay,
     validate,
 )
 from portfolio.tracker import (
@@ -70,6 +72,7 @@ from ui.common import (
     SIGNAL_COLORS,
     STRATEGY_CHOICES,
     money,
+    strategy_choice_index,
     strategy_choice_label,
 )
 from ui.detail_panel import DetailPanel
@@ -78,12 +81,15 @@ log = logging.getLogger(__name__)
 
 COLS = (
     "Ticker", "Put in", "Bought", "Trend", "Worth / Out", "P&L", "Return",
-    "/yr", "Risk", "Max DD", "Signal", "Sell", "",
+    "/yr", "Risk", "Max DD", "Signal", "Sell", "", "",
 )
 (
     C_TICKER, C_IN, C_BOUGHT, C_TREND, C_WORTH, C_PNL, C_RETURN,
-    C_YR, C_RISK, C_MAXDD, C_SIGNAL, C_SELL, C_REMOVE,
+    C_YR, C_RISK, C_MAXDD, C_SIGNAL, C_SELL, C_EDIT, C_REMOVE,
 ) = range(len(COLS))
+
+# the cash ledger, exactly as portfolio/cash.py replays it
+LEDGER_COLS = ("Date", "Transaction", "Amount", "Cash balance")
 
 # every stat column, blanked out when a lot has no data
 _STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
@@ -97,11 +103,20 @@ DISCLAIMER = (
 
 class InvestmentDialog(QDialog):
     """Pop-up panel for entering an investment: which stock, how much money
-    went in, when, under which trend, and whether it has already been sold."""
+    went in, when, under which trend, and whether it has already been sold.
 
-    def __init__(self, parent=None) -> None:
+    Opened by "Add investment…" to create one, or a row's "Edit…" button to
+    change an existing one — the same shape as PaperTradeDialog. In edit mode
+    the ticker is fixed (it has already been validated against Yahoo, and
+    changing it would make this a different position), and the already-sold
+    fields are gone: Edit is offered on open lots only, because rewriting a
+    closed lot's amount would rewrite its realized P&L.
+    """
+
+    def __init__(self, parent=None, *, edit: Lot | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("New investment")
+        self._editing = edit is not None
+        self.setWindowTitle("Edit investment" if self._editing else "New investment")
         self.setModal(True)
 
         today = QDate.currentDate()
@@ -128,13 +143,23 @@ class InvestmentDialog(QDialog):
         self._sell_date.setMaximumDate(today)
         self._sell_date.setEnabled(False)
 
+        if edit is not None:
+            self._ticker.setText(edit.ticker)
+            self._ticker.setReadOnly(True)
+            self._money_in.setValue(edit.money_in)
+            self._buy_date.setDate(
+                QDate.fromString(edit.buy_date, Qt.DateFormat.ISODate)
+            )
+            self._strategy.setCurrentIndex(strategy_choice_index(edit.strategy))
+
         form = QFormLayout()
         form.addRow("Ticker", self._ticker)
         form.addRow("Money in", self._money_in)
         form.addRow("Bought on", self._buy_date)
         form.addRow("Trend", self._strategy)
-        form.addRow("", self._sold_check)
-        form.addRow("Sold on", self._sell_date)
+        if edit is None:
+            form.addRow("", self._sold_check)
+            form.addRow("Sold on", self._sell_date)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -144,6 +169,14 @@ class InvestmentDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        if self._editing:
+            note = QLabel(
+                "Changing the amount or the buy date moves this transaction in "
+                "the cash ledger; the edit is refused if it would overdraw the "
+                "account on any later day."
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
         layout.addWidget(buttons)
 
     def _on_sold_toggled(self, checked: bool) -> None:
@@ -166,7 +199,9 @@ class InvestmentDialog(QDialog):
         self.accept()
 
     def values(self) -> tuple[str, float, date, str | None, date | None]:
-        sold = self._sold_check.isChecked()
+        # the sold fields are not shown when editing, so an edit never closes
+        # a position — that is what the Sell button is for
+        sold = self._sold_check.isChecked() and not self._editing
         return (
             self._ticker.text().strip().upper(),
             float(self._money_in.value()),
@@ -436,9 +471,21 @@ class InvestmentsPanel(QWidget):
         self._table.setAlternatingRowColors(True)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        for col in (len(COLS) - 2, len(COLS) - 1):
+        for col in (C_SELL, C_EDIT, C_REMOVE):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self._table.itemSelectionChanged.connect(self._on_selection)
+
+        # -- cash ledger (every external flow and every buy/sell leg, in order)
+        self._ledger = QTableWidget(0, len(LEDGER_COLS))
+        self._ledger.setHorizontalHeaderLabels(LEDGER_COLS)
+        self._ledger.verticalHeader().setVisible(False)
+        self._ledger.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._ledger.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._ledger.setMaximumHeight(160)
+        self._ledger.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self._ledger_label = QLabel("Transactions")
 
         self._summary = QLabel("")
         self._summary.setWordWrap(True)
@@ -455,6 +502,8 @@ class InvestmentsPanel(QWidget):
         left_layout.addWidget(self._table, 1)
         left_layout.addWidget(self._summary)
         left_layout.addWidget(self._summary_open)
+        left_layout.addWidget(self._ledger_label)
+        left_layout.addWidget(self._ledger)
         left_layout.addWidget(self._real)
         left_layout.addWidget(self._status)
         left_layout.addWidget(self._note)
@@ -556,6 +605,43 @@ class InvestmentsPanel(QWidget):
             self._pending.add(ticker)  # saved only once a report validates it
         else:
             self._persist()
+        self.recompute()
+
+    def _on_edit(self, lot: Lot) -> None:
+        """Reopen the investment dialog pre-filled, the way Paper Trading's
+        Edit… does. Offered on open lots only: a closed lot's realized P&L is
+        on the books, and editing its cost basis would rewrite it.
+
+        Raising `money_in`, or moving `buy_date` earlier, debits the ledger
+        harder or sooner and can overdraw a later day — so the prospective lot
+        list is replayed before anything is mutated.
+        """
+        if lot.is_sold:  # pragma: no cover - the button is disabled
+            self._refuse(
+                "Position already sold",
+                f"{lot.ticker} has been sold. Undo the sale before editing it.",
+            )
+            return
+        dialog = InvestmentDialog(self, edit=lot)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        _, money_in, buy, strategy, _ = dialog.values()
+        updated = Lot(
+            ticker=lot.ticker,          # fixed: already validated against Yahoo
+            money_in=money_in,
+            buy_date=buy.isoformat(),
+            strategy=strategy,
+            buy_seq=lot.buy_seq,        # keeps its place among same-date events
+        )
+        error = validate([updated if l is lot else l for l in self._lots], self._flows)
+        if error is not None:
+            self._refuse("Not enough cash", error)
+            return
+        self._generation += 1
+        lot.money_in = money_in
+        lot.buy_date = updated.buy_date
+        lot.strategy = strategy
+        self._persist()
         self.recompute()
 
     def _on_cash_flow(self, direction: str) -> None:
@@ -780,6 +866,37 @@ class InvestmentsPanel(QWidget):
         else:
             state, missing = RealInvestmentPanel.EXACT, ()
         self._real.show_pnl(r, state, missing)
+        self._render_ledger(r.unresolved_sales)
+
+    def _render_ledger(self, unresolved_sales: int) -> None:
+        """Every cash movement in replay order, with the running balance — the
+        same fold `validate` walks, so when it refuses a transaction the user
+        can see exactly which row it meant."""
+        trail = replay(ledger_events(self._lots, self._flows))
+        self._ledger.setRowCount(len(trail))
+        for i, (event, balance) in enumerate(trail):
+            self._ledger.setItem(i, 0, QTableWidgetItem(event.date))
+            self._ledger.setItem(i, 1, QTableWidgetItem(event.title))
+            amount = QTableWidgetItem(money(event.delta))
+            amount.setForeground(GREEN if event.delta >= 0 else RED)
+            self._ledger.setItem(i, 2, amount)
+            self._ledger.setItem(i, 3, QTableWidgetItem(f"${balance:,.2f}"))
+        self._ledger.scrollToBottom()
+
+        if not trail:
+            self._ledger_label.setText(
+                "Transactions — none yet. Deposit cash before you buy."
+            )
+            return
+        text = f"Transactions — {len(trail)} in the cash ledger"
+        if unresolved_sales:
+            # its credit is missing from the rows above, so say so rather than
+            # let the closing balance look wrong
+            text += (
+                f", plus {unresolved_sales} sale(s) still being valued "
+                f"(their proceeds are not yet in the balance)"
+            )
+        self._ledger_label.setText(text)
 
     def _render_empty(self) -> None:
         self._table.setRowCount(0)
@@ -842,12 +959,18 @@ class InvestmentsPanel(QWidget):
                 # leftover Sell button would silently rewrite recorded sales
                 self._table.removeCellWidget(i, C_SELL)
                 self._set_item(i, C_SELL, "")
+            # Edit and Remove are gated identically: a closed lot's realized
+            # P&L is on the books and must not be rewritten from the table
+            edit_btn = QPushButton("Edit…")
+            edit_btn.setEnabled(not lot.is_sold)
+            edit_btn.clicked.connect(lambda _c, l=lot: self._on_edit(l))
             remove_btn = QPushButton("Remove")
             remove_btn.setEnabled(not lot.is_sold)
             if lot.is_sold:
-                # realized P&L stays on the books; see _on_remove
+                edit_btn.setToolTip("Undo the sale first.")
                 remove_btn.setToolTip("Undo the sale first.")
             remove_btn.clicked.connect(lambda _c, l=lot: self._on_remove(l))
+            self._table.setCellWidget(i, C_EDIT, edit_btn)
             self._table.setCellWidget(i, C_REMOVE, remove_btn)
 
         if report.overall is None:
