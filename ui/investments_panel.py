@@ -167,6 +167,10 @@ class InvestmentDialog(QDialog):
         self._sell_date.setCalendarPopup(True)
         self._sell_date.setMaximumDate(today)
         self._sell_date.setEnabled(False)
+        # a reporting tag: bought entirely with profits, not bank money. Adds
+        # the "return on your own money" view, which leaves this position's
+        # swings out of the base (portfolio/cash.py)
+        self._from_profit = QCheckBox("Bought with profits (not my own money)")
 
         if edit is not None:
             self._ticker.setText(edit.ticker)
@@ -176,12 +180,14 @@ class InvestmentDialog(QDialog):
                 QDate.fromString(edit.buy_date, Qt.DateFormat.ISODate)
             )
             self._strategy.setCurrentIndex(strategy_choice_index(edit.strategy))
+            self._from_profit.setChecked(edit.from_profit)
 
         form = QFormLayout()
         form.addRow("Ticker", self._ticker)
         form.addRow("Money in", self._money_in)
         form.addRow("Bought on", self._buy_date)
         form.addRow("Trend", self._strategy)
+        form.addRow("", self._from_profit)
         if edit is None:
             form.addRow("", self._sold_check)
             form.addRow("Sold on", self._sell_date)
@@ -224,7 +230,7 @@ class InvestmentDialog(QDialog):
             return
         self.accept()
 
-    def values(self) -> tuple[str, float, date, str | None, date | None]:
+    def values(self) -> tuple[str, float, date, str | None, date | None, bool]:
         # the sold fields are not shown when editing, so an edit never closes
         # a position — that is what the Sell button is for
         sold = self._sold_check.isChecked() and not self._editing
@@ -234,6 +240,7 @@ class InvestmentDialog(QDialog):
             self._buy_date.date().toPyDate(),
             self._strategy.currentData(),
             self._sell_date.date().toPyDate() if sold else None,
+            self._from_profit.isChecked(),
         )
 
 
@@ -352,9 +359,10 @@ class RealInvestmentPanel(QGroupBox):
         ("net_external", "Net external capital"),
         ("account_value", "Current account value"),
         ("profit", "Real net profit"),
-        ("return_pct", "Real return"),
+        ("overall_return", "Overall return"),
+        ("own_return", "Return on your own money"),
     )
-    _DERIVED = ("account_value", "profit", "return_pct")
+    _DERIVED = ("account_value", "profit", "overall_return", "own_return")
 
     def __init__(self) -> None:
         super().__init__("Real Investment")
@@ -376,9 +384,18 @@ class RealInvestmentPanel(QGroupBox):
         outer.addLayout(form)
         outer.addWidget(self._caveat)
 
-    def _set_return_visible(self, visible: bool) -> None:
-        self._labels["return_pct"].setVisible(visible)
-        self._values["return_pct"].setVisible(visible)
+    def _set_row_visible(self, key: str, visible: bool) -> None:
+        self._labels[key].setVisible(visible)
+        self._values[key].setVisible(visible)
+
+    def _set_pct(self, key: str, pct, bound: str, colour) -> None:
+        value = self._values[key]
+        if pct is None:   # no capital in this base to measure against
+            value.setText("n/a")
+            value.setStyleSheet(f"color: {GREY.name()};")
+            return
+        value.setText(f"{bound}{pct:+.1f}%")
+        value.setStyleSheet(f"color: {colour.name()};")
 
     def show_pnl(self, r, state: str, missing: Sequence[str] = ()) -> None:
         """The external-capital rows are exact in every state: they read the
@@ -393,12 +410,19 @@ class RealInvestmentPanel(QGroupBox):
         self._values["withdrawn"].setText(plain(r.total_withdrawn))
         self._values["net_external"].setText(plain(r.net_external))
 
+        # the own-money return only means something once a position is flagged
+        # as bought with profits; otherwise it equals the overall return
+        own_shown = r.has_profit_positions
+        self._set_row_visible("own_return", own_shown)
+        self._labels["overall_return"].setText(
+            "Overall return" if own_shown else "Real return"
+        )
+
         if state == self.WAITING:
             for key in self._DERIVED:
                 self._values[key].setText("valuing…")
                 self._values[key].setStyleSheet("")
             self._values["profit"].setStyleSheet("font-weight: bold;")
-            self._set_return_visible(True)
             self._caveat.setVisible(False)
             return
 
@@ -420,12 +444,9 @@ class RealInvestmentPanel(QGroupBox):
         profit.setStyleSheet(f"font-weight: bold; color: {colour.name()};")
 
         # a return on zero or negative capital is meaningless, not infinite
-        show_return = r.real_return_pct is not None
-        self._set_return_visible(show_return)
-        if show_return:
-            value = self._values["return_pct"]
-            value.setText(f"{bound}{r.real_return_pct:+.1f}%")
-            value.setStyleSheet(f"color: {colour.name()};")
+        self._set_pct("overall_return", r.overall_return_pct, bound, colour)
+        if own_shown:
+            self._set_pct("own_return", r.own_money_return_pct, bound, colour)
 
         self._caveat.setVisible(state == self.PARTIAL)
         if state == self.PARTIAL:
@@ -468,11 +489,26 @@ class ProfitReportDialog(QDialog):
         sub = QLabel(
             f"Account value ${pnl.account_value:,.2f}  −  money you put in "
             f"${pnl.net_external:,.2f}"
-            + (f"   ({pnl.real_return_pct:+.1f}%)"
-               if pnl.real_return_pct is not None else "")
         )
         sub.setStyleSheet(f"color: {GREY.name()};")
         layout.addWidget(sub)
+
+        # two return bases, same profit; the own-money line only when a position
+        # is flagged bought-with-profits (portfolio/cash.py)
+        def _pct(v):
+            return f"{v:+.1f}%" if v is not None else "n/a"
+        if pnl.has_profit_positions:
+            rets = QLabel(
+                f"Overall return {_pct(pnl.overall_return_pct)} "
+                f"(on all ${pnl.total_invested:,.0f} invested)     "
+                f"Return on your own money {_pct(pnl.own_money_return_pct)} "
+                f"(on your ${pnl.own_invested:,.0f})"
+            )
+        else:
+            rets = QLabel(f"Return {_pct(pnl.overall_return_pct)}")
+        rets.setWordWrap(True)
+        rets.setStyleSheet("font-weight: bold;")
+        layout.addWidget(rets)
 
         # -- per-position breakdown
         table = QTableWidget(len(results), len(self._COLS))
@@ -839,7 +875,7 @@ class InvestmentsPanel(QWidget):
         dialog = InvestmentDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        ticker, money_in, buy, strategy, sell = dialog.values()
+        ticker, money_in, buy, strategy, sell, from_profit = dialog.values()
         if not ticker:
             return
         seq = next_seq(self._lots, self._flows)
@@ -851,6 +887,7 @@ class InvestmentsPanel(QWidget):
             strategy=strategy,
             buy_seq=seq,
             sell_seq=seq + 1 if sell is not None else None,
+            from_profit=from_profit,
         )
         # a buy spends cash on hand first and infers a deposit for the rest, so
         # it cannot fail — reinvested profits are consumed before any new
@@ -890,13 +927,14 @@ class InvestmentsPanel(QWidget):
         dialog = InvestmentDialog(self, edit=lot)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        _, money_in, buy, strategy, _ = dialog.values()
+        _, money_in, buy, strategy, _, from_profit = dialog.values()
         updated = Lot(
             ticker=lot.ticker,          # fixed: already validated against Yahoo
             money_in=money_in,
             buy_date=buy.isoformat(),
             strategy=strategy,
             buy_seq=lot.buy_seq,        # keeps its place among same-date events
+            from_profit=from_profit,
         )
         error = validate([updated if l is lot else l for l in self._lots], self._flows)
         if error is not None:
@@ -907,6 +945,7 @@ class InvestmentsPanel(QWidget):
         lot.money_in = money_in
         lot.buy_date = updated.buy_date
         lot.strategy = strategy
+        lot.from_profit = from_profit
         self._persist()
         self.recompute()
 

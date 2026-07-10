@@ -70,6 +70,11 @@ class Lot:
     # share a date so a replay is stable across loads
     buy_seq: int = 0
     sell_seq: int | None = None
+    # user's declaration that this position was bought entirely with profits,
+    # not money from their bank. A reporting tag only: it changes the
+    # "return on your own money" view (portfolio/cash.py) and nothing else —
+    # not the cash balance, not the honest profit, not the ledger.
+    from_profit: bool = False
 
     @property
     def is_sold(self) -> bool:
@@ -104,6 +109,7 @@ def load_investments_doc(
                     None if entry.get("sell_seq") is None
                     else int(entry["sell_seq"])
                 ),
+                from_profit=bool(entry.get("from_profit", False)),
             )
             for i, entry in enumerate(raw["lots"])
             if float(entry["money_in"]) > 0
@@ -149,6 +155,7 @@ def save_investments(
                 "strategy": lot.strategy,
                 "buy_seq": lot.buy_seq,
                 "sell_seq": lot.sell_seq,
+                "from_profit": lot.from_profit,
             }
             for lot in lots
         ],

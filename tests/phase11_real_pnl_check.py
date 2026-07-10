@@ -376,6 +376,44 @@ def scenarios_reproduce_with_no_deposits_at_all() -> None:
     print("  -> only the first $2,000 was inferred; both reinvestments were free")
 
 
+def two_return_bases_diverge_on_reinvestment_loss() -> None:
+    """Same profit, two denominators. A profit-flagged position that loses drags
+    the overall return down but not the return on the user's own money, because
+    that money was never their capital to lose."""
+    # deposit $2,000; A bought with own money, sold for $5,000; B bought with
+    # $3,000 of profit and flagged from_profit; B falls to $500
+    flows = [_flow(2000, DEPOSIT, "2026-01-02", 0)]
+    lots = [
+        Lot("A", 2000.0, "2026-01-05", money_out=5000.0, sell_date="2026-03-01",
+            buy_seq=1, sell_seq=2),
+        Lot("B", 3000.0, "2026-03-02", buy_seq=3, from_profit=True),
+    ]
+    r = compute_real_pnl(lots, flows, {1: 500.0})
+
+    assert abs(r.real_net_profit - 500.0) < TOL       # same profit both ways
+    assert abs(r.total_invested - 5000.0) < TOL
+    assert abs(r.own_invested - 2000.0) < TOL         # B excluded by its flag
+    assert abs(r.overall_return_pct - 10.0) < TOL     # 500 / 5000
+    assert abs(r.own_money_return_pct - 25.0) < TOL   # 500 / 2000
+    assert r.has_profit_positions
+    print(
+        f"two bases OK: overall {r.overall_return_pct:.0f}% "
+        f"vs own-money {r.own_money_return_pct:.0f}% on the same +$500"
+    )
+
+
+def own_money_return_absent_without_profit_flags() -> None:
+    """With nothing flagged, the two bases coincide and the own-money view has
+    nothing extra to say — the UI hides it."""
+    flows = [_flow(2000, DEPOSIT, "2026-01-02", 0)]
+    lots = [Lot("A", 2000.0, "2026-01-05", buy_seq=1)]
+    r = compute_real_pnl(lots, flows, {0: 2500.0})
+    assert not r.has_profit_positions
+    assert abs(r.total_invested - r.own_invested) < TOL
+    assert abs(r.overall_return_pct - r.own_money_return_pct) < TOL
+    print("no profit flags -> both bases identical")
+
+
 def funding_splits_own_from_recycled_proceeds() -> None:
     """Each purchase splits into fresh external money and recycled proceeds,
     with no fungibility convention. Proceeds are spent before idle cash."""
@@ -514,6 +552,8 @@ NEGATIVE_PATHS = (
     unresolved_sale_understates_cash,
     no_external_capital_has_no_return_pct,
     same_date_events_replay_in_entry_order,
+    two_return_bases_diverge_on_reinvestment_loss,
+    own_money_return_absent_without_profit_flags,
     funding_splits_own_from_recycled_proceeds,
     idle_deposit_is_own_money_not_proceeds,
     ledger_rows_read_as_a_statement,

@@ -24,6 +24,16 @@ is assumed to have been funded from outside for exactly the shortfall, and
 always spent first, so a purchase funded by an earlier sale creates no deposit
 and reinvested profit is never mistaken for money from the bank.
 
+Return is reported two ways, against the same profit. `overall_return_pct`
+divides by every dollar put into a position; `own_money_return_pct` divides by
+only the part the user did not flag as bought-with-profits. The profit figure
+is identical, so during a reinvestment loss the two percentages separate: the
+overall return sags because the reinvested-then-lost money is still in its
+base, while the own-money return holds up because a profit-funded position was
+never the user's capital to lose. This is a presentation lens, not a second
+truth — the profit, the cash balance, and the ledger are unaffected by the
+flag.
+
 No cash balance is stored. It is replayed from the ledger on demand, because a
 stored balance is a second source of truth that can silently drift out of
 agreement with the lots. Deriving it means the identity above holds by
@@ -109,9 +119,17 @@ class RealPnL:
     positions_value: float           # open lots only, at market
     account_value: float             # cash + positions_value
     real_net_profit: float           # account_value - net_external
-    real_return_pct: float | None    # None when net_external <= 0
+    real_return_pct: float | None    # profit / net_external; None when <= 0
     unresolved_sales: int            # sold lots still awaiting their proceeds
     auto_funded: float               # of total_deposited, how much was inferred
+    # two views of the same profit against different capital bases. The profit
+    # is identical; only the denominator changes, so during a reinvestment loss
+    # they diverge. See portfolio/cash.py module docstring.
+    total_invested: float            # every dollar put into a position
+    own_invested: float              # of that, the part not flagged from-profit
+    overall_return_pct: float | None      # profit / total_invested
+    own_money_return_pct: float | None    # profit / own_invested
+    has_profit_positions: bool       # any lot flagged bought-with-profits
 
 
 @dataclass(slots=True, eq=False)
@@ -314,6 +332,21 @@ def compute_real_pnl(
         real_net_profit / net_external * 100.0 if net_external > EPS else None
     )
 
+    # the two headline percentages. Same profit, two bases: everything put into
+    # positions, versus only the part the user did not flag as profit-funded.
+    # Reinvestment losses shrink the profit and inflate the overall base, so the
+    # overall return sags while the own-money return holds up.
+    total_invested = float(sum(lot.money_in for lot in lots))
+    own_invested = float(
+        sum(lot.money_in for lot in lots if not getattr(lot, "from_profit", False))
+    )
+    overall_return_pct = (
+        real_net_profit / total_invested * 100.0 if total_invested > EPS else None
+    )
+    own_money_return_pct = (
+        real_net_profit / own_invested * 100.0 if own_invested > EPS else None
+    )
+
     return RealPnL(
         total_deposited=float(deposited),
         total_withdrawn=float(withdrawn),
@@ -325,6 +358,13 @@ def compute_real_pnl(
         real_return_pct=real_return_pct,
         unresolved_sales=sum(1 for lot in lots if is_unresolved_sale(lot)),
         auto_funded=float(auto_funded),
+        total_invested=total_invested,
+        own_invested=own_invested,
+        overall_return_pct=overall_return_pct,
+        own_money_return_pct=own_money_return_pct,
+        has_profit_positions=any(
+            getattr(lot, "from_profit", False) for lot in lots
+        ),
     )
 
 
