@@ -117,6 +117,14 @@ class Snapshot:
 # every stat column, blanked out when a lot has no data
 _STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
 
+
+def _display_date(iso: str) -> str:
+    """ISO storage date (YYYY-MM-DD) shown to the user as DD/MM/YY."""
+    try:
+        return date.fromisoformat(iso).strftime("%d/%m/%y")
+    except ValueError:
+        return iso
+
 DISCLAIMER = (
     "Real-position tracker — open lots are valued from ~15-min-delayed closes; "
     "sold lots are frozen at the close on the day you sold, so their return "
@@ -158,6 +166,7 @@ class InvestmentDialog(QDialog):
         self._buy_date = QDateEdit(today)
         self._buy_date.setCalendarPopup(True)
         self._buy_date.setMaximumDate(today)
+        self._buy_date.setDisplayFormat("dd/MM/yy")
         self._strategy = QComboBox()
         for label, value in STRATEGY_CHOICES:
             self._strategy.addItem(label, value)
@@ -166,6 +175,7 @@ class InvestmentDialog(QDialog):
         self._sell_date = QDateEdit(today)
         self._sell_date.setCalendarPopup(True)
         self._sell_date.setMaximumDate(today)
+        self._sell_date.setDisplayFormat("dd/MM/yy")
         self._sell_date.setEnabled(False)
         # a reporting tag: bought entirely with profits, not bank money. Adds
         # the "return on your own money" view, which leaves this position's
@@ -258,6 +268,7 @@ class SellDialog(QDialog):
         self._sell_date.setCalendarPopup(True)
         self._sell_date.setMaximumDate(today)
         self._sell_date.setMinimumDate(QDate.fromString(lot.buy_date, Qt.DateFormat.ISODate))
+        self._sell_date.setDisplayFormat("dd/MM/yy")
 
         form = QFormLayout()
         form.addRow("Sold on", self._sell_date)
@@ -306,6 +317,7 @@ class CashFlowDialog(QDialog):
         self._date = QDateEdit(today)
         self._date.setCalendarPopup(True)
         self._date.setMaximumDate(today)
+        self._date.setDisplayFormat("dd/MM/yy")
 
         form = QFormLayout()
         form.addRow("Amount", self._amount)
@@ -1187,7 +1199,7 @@ class InvestmentsPanel(QWidget):
         trail = replay(ledger_events(self._lots, self._flows))
         self._ledger.setRowCount(len(trail))
         for i, (event, balance) in enumerate(trail):
-            self._ledger.setItem(i, 0, QTableWidgetItem(event.date))
+            self._ledger.setItem(i, 0, QTableWidgetItem(_display_date(event.date)))
             self._ledger.setItem(i, 1, QTableWidgetItem(event.title))
             amount = QTableWidgetItem(money(event.delta))
             amount.setForeground(GREEN if event.delta >= 0 else RED)
@@ -1235,9 +1247,9 @@ class InvestmentsPanel(QWidget):
             self._set_item(i, C_TICKER, lot.ticker)
             self._set_item(i, C_IN, f"${lot.money_in:,.0f}")
             self._set_funded_item(i, funding.get(id(lot)))
-            bought = lot.buy_date
+            bought = _display_date(lot.buy_date)
             if lot.is_sold:
-                bought += f" → {lot.sell_date or '?'}"
+                bought += f" → {_display_date(lot.sell_date) if lot.sell_date else '?'}"
             self._set_item(i, C_BOUGHT, bought)
             self._set_item(i, C_TREND, strategy_choice_label(lot.strategy))
             if res.error is not None:
