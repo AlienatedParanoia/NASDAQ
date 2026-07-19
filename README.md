@@ -94,13 +94,11 @@ cannot ship with that maths broken.
 
 ```
 .venv\Scripts\pip install -r requirements-dev.txt
-.venv\Scripts\pyinstaller main.py --name nasdaq-advisor --windowed --noconfirm ^
-  --collect-all yfinance --collect-all curl_cffi --collect-all certifi ^
-  --hidden-import _cffi_backend --hidden-import peewee --hidden-import multitasking ^
-  --exclude-module PySide6 --exclude-module PyQt5 --exclude-module matplotlib
+build.bat
 ```
 
-Ship the whole `dist\nasdaq-advisor\` folder (zip it). The frozen app stores
-its cache and log in `%LOCALAPPDATA%\nasdaq-advisor\`. Verify a build with
-`dist\nasdaq-advisor\nasdaq-advisor.exe --selftest` (exit code 0 and a
-"selftest OK" line in `%LOCALAPPDATA%\nasdaq-advisor\advisor.log`).
+`build.bat` wraps `pyinstaller nasdaq-advisor.spec --noconfirm` and then runs
+the frozen `--selftest` (exit code 0 and a "selftest OK" line in
+`%LOCALAPPDATA%\nasdaq-advisor\advisor.log` mean the build is good). Ship the
+whole `dist\nasdaq-advisor\` folder (zip it). The frozen app stores its cache
+and log in `%LOCALAPPDATA%\nasdaq-advisor\`.
