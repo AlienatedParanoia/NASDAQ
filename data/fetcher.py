@@ -596,13 +596,27 @@ class DataFetcher:
 # --------------------------------------------------------------- what to fetch
 
 
-def _no_held_tickers() -> set[str]:
-    return set()
+def _ledger_held_tickers() -> set[str]:
+    """Tickers any forward account still holds, read from the trade ledger.
+
+    Deliberately forgiving: a missing or unreadable ledger means "no bots have
+    traded yet", which is true on a first run and must not stop a price fetch.
+    """
+    try:
+        import paths as _paths
+
+        if not _paths.ledger_path().exists():
+            return set()
+        from engine.ledger import Ledger
+
+        with Ledger(_paths.ledger_path()) as ledger:
+            return ledger.held_tickers()
+    except Exception:
+        log.warning("could not read held tickers from the ledger", exc_info=True)
+        return set()
 
 
-# Phase 3 points this at the trade ledger. Until then no bot holds anything, so
-# the universe is the whole story.
-held_tickers: Callable[[], set[str]] = _no_held_tickers
+held_tickers: Callable[[], set[str]] = _ledger_held_tickers
 
 
 def tickers_to_fetch(universe: Iterable[str] | None = None) -> list[str]:

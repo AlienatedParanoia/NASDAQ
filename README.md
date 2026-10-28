@@ -87,6 +87,67 @@ requests; a same-day re-read is pure cache. Trading sessions, early closes and
 "which bar is finished" come from `data/calendar.py`, backed by the real NYSE
 (XNYS) calendar rather than a weekday approximation.
 
+## Simulated broker
+
+Bots trade fake money through `engine/` — an abstract `Broker` interface with a
+single simulated implementation. There is no real-broker adapter and none is
+planned.
+
+**Positions are never stored.** A holding is derived from its fills plus the
+corporate actions that touched it, and cash is the sum of its events. There is
+one record, not two to drift apart, so a position cannot silently disagree with
+the trades that produced it. Order status changes are *appended* to an event
+log rather than overwriting a row, so "why didn't my bot buy?" stays answerable
+months later, rejection reason included.
+
+Each session is processed in three steps, in this order: corporate actions with
+that ex-date (splits re-term holdings **and** resting orders; dividends credit
+cash), then order matching against the session's bar, then mark-to-market and a
+snapshot. Because prices are stored as-traded, a split genuinely halves the
+price on its ex-date — so the same handling is correct for historical replay and
+forward trading alike. There is no "backtest mode" to get subtly wrong.
+
+Fills are decided against the raw OHLC:
+
+| Order | Condition | Fill price |
+|---|---|---|
+| market buy / sell | always | open ± slippage |
+| limit buy | open ≤ limit | open (price improvement kept) |
+| limit buy | low ≤ limit | limit |
+| limit sell | open ≥ limit | open |
+| limit sell | high ≥ limit | limit |
+| stop buy | open ≥ stop / high ≥ stop | open / stop, + slippage |
+| stop sell | open ≤ stop / low ≤ stop | open / stop, − slippage |
+
+Limit fills take **no** slippage — a limit order fills at its price or better by
+definition. Within a session, sells settle before buys (so a sale can fund a
+purchase), each side oldest-first. An order decided on bar *t* can never fill
+before *t+1*; the broker enforces that rather than trusting callers.
+
+Cash can never go negative and shares can never go short: buys reserve cash and
+resting sells reserve shares at submission, and both are re-checked at fill
+time. Every rejection carries a human-readable reason.
+
+### Costs are placeholders
+
+`engine/costs.py` ships invented figures — $1.00 minimum commission, 0.5¢ per
+share, 5 bps slippage. **They are not your broker's fee schedule, and every
+reported return is only as trustworthy as they are.** At 5 bps a daily-trading
+bot loses roughly 2.5%/yr to slippage alone; set it to zero and mediocre
+strategies start looking excellent. Replace them before believing any result.
+
+### Deliberate simplifications
+
+- Dividends credit cash on the **ex-date**, not the pay date, so a dividend is
+  re-investable sooner than reality allows.
+- Fills are all-or-nothing at one price: no partial fills, no queue position,
+  no volume cap — a bot can "buy" more than a day's volume.
+- Cash settles instantly (no T+1). No margin, no shorting, no options.
+
+`python -m tests.phase3_broker_walkthrough` prints a worked example across eight
+sessions — a split, a dividend, an expiry, a rejection, a halted session — with
+every figure shown so the arithmetic can be checked by hand.
+
 ## My Investments (real positions)
 
 The My Investments tab records what you **actually** did: any Yahoo ticker, how
@@ -127,9 +188,14 @@ The earlier build phases each have a runnable script under `tests/` (run from th
 repo root with `python -m tests.<name>`): `phase1_data_check`,
 `phase2_indicator_check`, `phase2_universe_check`, `phase3_backtest_check`,
 `phase5_ui_smoke`, `phase7_investments_check`, `phase11_real_pnl_check`, and
-`regression_review_fixes`. `phase2_universe_check` is the slow one — it
-cold-fetches the whole union, then proves a same-day re-read makes zero network
-calls.
+`regression_review_fixes`, and `phase3_broker_walkthrough`.
+`phase2_universe_check` is the slow one — it cold-fetches the whole union, then
+proves a same-day re-read makes zero network calls.
+
+The broker's invariants (cash never negative, no accidental shorting,
+`equity == cash + Σ shares × close`, and state rebuilt from the ledger matching
+the live account) are checked by property tests over random order sequences on
+random-walk prices, with fixed seeds so a failure is reproducible.
 
 `phase11_real_pnl_check` is fully offline and covers the cash ledger and Real
 Investment P&L; its five scenarios also run inside `--selftest`, so a build

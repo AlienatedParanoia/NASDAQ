@@ -5,6 +5,13 @@ data/cache.db
 data/cache.db-wal
 data/cache.db-shm
 data/yf_tz/
+# bot trade ledgers: runtime data, like cache.db. Never commit a ledger.
+data/ledger.db
+data/ledger.db-wal
+data/ledger.db-shm
+data/backtest_ledger.db
+data/backtest_ledger.db-wal
+data/backtest_ledger.db-shm
 data/ui_smoke.png
 data/paper_smoke.png
 # personal financial data written here when running from source (paths.data_dir())

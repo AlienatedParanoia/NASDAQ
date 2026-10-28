@@ -55,6 +55,22 @@ def db_path() -> Path:
     return data_dir() / "cache.db"
 
 
+def ledger_path() -> Path:
+    """The forward paper-trading ledger.
+
+    Deliberately NOT inside cache.db: that file is wiped whenever
+    CACHE_VERSION changes, and a trade ledger must never be collateral damage
+    of a schema bump. This is the record of what the bots actually did.
+    """
+    return data_dir() / "ledger.db"
+
+
+def backtest_ledger_path() -> Path:
+    """Replay results, kept in a separate file from the forward ledger so a
+    backtest can never be read as live paper performance (phase 4)."""
+    return data_dir() / "backtest_ledger.db"
+
+
 def log_path() -> Path:
     return data_dir() / "advisor.log"
 

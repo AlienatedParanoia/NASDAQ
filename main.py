@@ -46,6 +46,8 @@ def _selftest() -> int:
         assert len(universe) > 400, f"universe looks truncated: {len(universe)}"
         log.info("selftest OK: universe loaded, %s", describe())
 
+        _selftest_broker(log)
+
         fetcher = DataFetcher(paths.db_path())
         data = fetcher.get_stock("AAPL", force=True)
         fetcher.close()
@@ -57,6 +59,50 @@ def _selftest() -> int:
     except Exception:
         log.exception("selftest FAILED")
         return 1
+
+
+def _selftest_broker(log) -> None:
+    """Round-trip one order through a SimBroker on synthetic bars.
+
+    Entirely offline and throwaway: it proves the engine imports, the ledger
+    schema applies, and an order can actually fill inside a frozen build —
+    none of which import-time success demonstrates.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from engine.costs import CostModel
+    from engine.ledger import Ledger
+    from engine.orders import Order, OrderStatus, Side
+    from engine.sim_broker import Bar, SimBroker
+
+    with Ledger(Path(tempfile.mkdtemp()) / "selftest.db") as ledger:
+        account = ledger.create_account("selftest", 10_000.0)
+        broker = SimBroker(ledger, account.id, costs=CostModel(0.0, 0.0, 1.0, 5.0))
+        broker.set_mark("TEST", 100.0)
+        d1 = pd.Timestamp("2026-01-05")
+        d2 = pd.Timestamp("2026-01-06")
+
+        order = broker.submit(
+            Order(account_id=account.id, created_session=d1, ticker="TEST",
+                  side=Side.BUY, qty=10, reason="selftest")
+        )
+        assert order.status is OrderStatus.PENDING, order.reject_reason
+        result = broker.process_session(
+            d2, {"TEST": Bar(100.0, 101.0, 99.0, 100.0)}
+        )
+        assert len(result.fills) == 1, "selftest order did not fill"
+        assert broker.cash() >= 0
+        expected = result.cash + 10 * 100.0
+        assert abs(result.equity - expected) < 0.01, (
+            f"equity identity broken: {result.equity} != {expected}"
+        )
+        log.info(
+            "selftest OK: broker filled %d share(s) at %.4f, cash %.2f, equity %.2f",
+            result.fills[0].qty, result.fills[0].price, result.cash, result.equity,
+        )
 
 
 def main() -> None:
