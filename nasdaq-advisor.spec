@@ -3,9 +3,12 @@ from PyInstaller.utils.hooks import collect_all
 
 # the index membership CSVs are read at runtime; without this they are simply
 # absent from the exe and the universe fails to load (see paths.resource_dir)
-datas = [('data/constituents/*.csv', 'data/constituents')]
+datas = [
+    ('data/constituents/*.csv', 'data/constituents'),
+    ('bots.yaml', '.'),          # bot definitions are read at runtime
+]
 binaries = []
-hiddenimports = ['_cffi_backend', 'peewee', 'multitasking']
+hiddenimports = ['_cffi_backend', 'peewee', 'multitasking', 'yaml']
 tmp_ret = collect_all('yfinance')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('curl_cffi')

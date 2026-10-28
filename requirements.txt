@@ -6,3 +6,4 @@ PyQt6==6.11.0
 pyqtgraph==0.14.0
 platformdirs==4.10.0
 exchange_calendars==4.13.2
+PyYAML==6.0.3

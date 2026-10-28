@@ -1,0 +1,70 @@
+# Trading bots. Fake money only — see README.
+#
+# Each entry under `bots:` defines one bot with its own isolated account.
+# Editing this file is how you add, retune or disable a bot; nothing here
+# requires touching the engine.
+#
+# Fields
+#   strategy       required. One of: trend, mean_reversion
+#   params         passed to the strategy's constructor
+#   indexes        which index members to trade: sp500, nasdaq100 (default both)
+#   universe       explicit tickers instead of an index (overrides `indexes`)
+#   starting_cash  opening balance for the bot's account
+#   sizing         fixed_dollar | equal_weight | volatility_target
+#   risk           per-bot limits; see below
+#   enabled        false keeps the definition but stops it trading
+#
+# Risk settings
+#   max_position_pct    most of equity one position may reach (null = no limit)
+#   max_positions       how many positions may be open at once
+#   max_orders_per_day  churn brake (null = no limit)
+#   max_drawdown_pct    kill the bot this far below its own equity peak
+#   liquidate_on_kill   false (default) holds positions after a kill; true sells
+#   min_order_value     skip trades too small to be worth the commission
+#
+# NOTE: a killed bot stops trading but KEEPS its positions unless
+# liquidate_on_kill is true. Selling at a drawdown trough turns a paper loss
+# into a permanent one, and with fake money watching the positions recover (or
+# not) is the more informative outcome.
+
+bots:
+  trend-follower:
+    strategy: trend
+    params:
+      fast: 20
+      slow: 50
+    indexes: [nasdaq100]
+    starting_cash: 100000
+    sizing: equal_weight
+    risk:
+      max_position_pct: 0.15
+      max_positions: 10
+      max_orders_per_day: 5
+      max_drawdown_pct: 0.25
+      liquidate_on_kill: false
+      min_order_value: 500
+    enabled: true
+
+  mean-reverter:
+    strategy: mean_reversion
+    params:
+      rsi_period: 14
+      bb_period: 20
+      bb_std: 2.0
+      rsi_entry: 30.0
+      rsi_exit: 55.0
+      max_hold_bars: 15
+    indexes: [nasdaq100]
+    starting_cash: 100000
+    sizing:
+      type: volatility_target
+      target_annual_vol: 0.20
+      window: 60
+    risk:
+      max_position_pct: 0.15
+      max_positions: 8
+      max_orders_per_day: 5
+      max_drawdown_pct: 0.25
+      liquidate_on_kill: false
+      min_order_value: 500
+    enabled: true

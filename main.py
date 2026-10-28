@@ -47,6 +47,7 @@ def _selftest() -> int:
         log.info("selftest OK: universe loaded, %s", describe())
 
         _selftest_broker(log)
+        _selftest_replay(log)
 
         fetcher = DataFetcher(paths.db_path())
         data = fetcher.get_stock("AAPL", force=True)
@@ -102,6 +103,60 @@ def _selftest_broker(log) -> None:
         log.info(
             "selftest OK: broker filled %d share(s) at %.4f, cash %.2f, equity %.2f",
             result.fills[0].qty, result.fills[0].price, result.cash, result.equity,
+        )
+
+
+def _selftest_replay(log) -> None:
+    """Run one replay session on cached AAPL.
+
+    Offline apart from the cache, and throwaway: it proves the bot framework,
+    the config file and the strategy port all survived packaging, which
+    importing them does not.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from bots.bot import Bot
+    from bots.data_view import DataView
+    from bots.registry import load_specs
+    from bots.strategies.trend import TrendStrategy
+    from data.fetcher import DataFetcher, adjust_closes
+    from engine.ledger import BACKTEST, Ledger
+
+    specs = load_specs()
+    assert specs, "bots.yaml defined no bots"
+    for spec in specs:
+        spec.build_strategy()      # every configured bot must construct
+
+    fetcher = DataFetcher(paths.db_path())
+    try:
+        prices = fetcher._load_prices("AAPL")
+        if prices.empty:
+            log.info("selftest: no cached AAPL bars yet, skipping the replay step")
+            return
+        adjusted = adjust_closes(prices, fetcher.actions("AAPL"))
+    finally:
+        fetcher.close()
+
+    with Ledger(Path(tempfile.mkdtemp()) / "selftest_bt.db") as ledger:
+        bot = Bot.create(
+            name="selftest-replay", strategy=TrendStrategy(),
+            ledger=ledger, starting_cash=100_000.0,
+            universe=("AAPL",), kind=BACKTEST,
+        )
+        session = prices.index[-1]
+        view = DataView(
+            session=session, frames={"AAPL": prices},
+            adjusted_closes={"AAPL": adjusted},
+        )
+        result = bot.run_session(session, view)
+        assert bot.broker.cash() >= 0
+        log.info(
+            "selftest OK: replayed %s on %s — %d request(s), %d submitted, equity %.2f",
+            bot.strategy.name, session.date(), result.requested, result.submitted,
+            result.equity,
         )
 
 
