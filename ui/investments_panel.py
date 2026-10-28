@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 
 import paths
 from data.fetcher import DataFetcher
+from data.symbols import normalize
 from portfolio.cash import (
     DEPOSIT,
     WITHDRAWAL,
@@ -228,8 +229,10 @@ class InvestmentDialog(QDialog):
         # the sold fields are not shown when editing, so an edit never closes
         # a position — that is what the Sell button is for
         sold = self._sold_check.isChecked() and not self._editing
+        raw = self._ticker.text().strip()
         return (
-            self._ticker.text().strip().upper(),
+            # one spelling per company: BRK.B and BRK-B must not become two lots
+            normalize(raw) if raw else "",
             float(self._money_in.value()),
             self._buy_date.date().toPyDate(),
             self._sell_date.date().toPyDate() if sold else None,

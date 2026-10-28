@@ -197,7 +197,7 @@ def sale_day_curve_ends_at_proceeds(fetcher: DataFetcher) -> None:
 
     from data.fetcher import StockData
 
-    stale_data = StockData(ticker="AAPL", prices=px, fundamentals=None, stale=True)
+    stale_data = StockData(ticker="AAPL", prices=px, stale=True)
     res_stale, _ = _analyze_lot(Lot("AAPL", 1000.0, old), stale_data)
     assert res_stale.note is not None and "out of date" in res_stale.note
     print("sale-day proceeds in V(t) + stale-price note OK")

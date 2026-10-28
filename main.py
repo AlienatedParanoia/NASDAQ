@@ -15,9 +15,15 @@ def _selftest() -> int:
     frozen build, where import-time success proves nothing. Also replays the
     five Real Investment P&L scenarios — pure arithmetic, no network — so a
     build cannot ship with the cash ledger broken. Result goes to the log file
-    (a --windowed exe has no stdout) and the exit code."""
+    (a --windowed exe has no stdout) and the exit code.
+
+    The trading calendar is exercised here too, not merely imported:
+    exchange_calendars loads data files at first use, so a packaging mistake
+    shows up as a crash the first time a session is looked up — long after
+    import succeeded, and only in the frozen build."""
     import logging
 
+    from data import calendar as market_calendar
     from data.fetcher import DataFetcher
     from tests.phase11_real_pnl_check import run_scenarios
 
@@ -25,6 +31,14 @@ def _selftest() -> int:
     try:
         run_scenarios()
         log.info("selftest OK: real-investment P&L scenarios pass")
+
+        # Thanksgiving 2025 is closed and the next session is a half-day: a
+        # cheap assertion that the calendar's data files really shipped
+        assert not market_calendar.is_trading_day("2025-11-27")
+        assert market_calendar.is_early_close("2025-11-28")
+        session = market_calendar.latest_complete_session()
+        log.info("selftest OK: XNYS calendar loaded, latest complete session %s", session)
+
         fetcher = DataFetcher(paths.db_path())
         data = fetcher.get_stock("AAPL", force=True)
         fetcher.close()

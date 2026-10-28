@@ -10,6 +10,10 @@ tmp_ret = collect_all('curl_cffi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('certifi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# exchange_calendars ships CSV holiday/precomputed data; without collect_all the
+# frozen build imports fine and then fails at the first calendar lookup
+tmp_ret = collect_all('exchange_calendars')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

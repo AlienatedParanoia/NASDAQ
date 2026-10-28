@@ -16,6 +16,8 @@ the December 2025 annual reconstitution confirmed via Nasdaq press releases:
 are plain alphanumeric and identical in Yahoo Finance format.
 """
 
+from data.symbols import normalize_all
+
 NASDAQ_100: tuple[str, ...] = (
     "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "ALAB", "ALNY",
     "AMAT", "AMD", "AMGN", "AMZN", "APP", "ARM", "ASML", "AVGO", "AXON",
@@ -33,4 +35,4 @@ NASDAQ_100: tuple[str, ...] = (
 
 
 def get_universe() -> list[str]:
-    return list(NASDAQ_100)
+    return normalize_all(NASDAQ_100)

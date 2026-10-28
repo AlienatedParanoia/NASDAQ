@@ -27,6 +27,7 @@ import pandas as pd
 
 import paths
 from data.fetcher import DataFetcher, FetchError, StockData
+from data.symbols import normalize
 from portfolio.cash import CashFlow
 from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
 from strategies.backtest_engine import perf_stats, time_base
@@ -95,7 +96,7 @@ def load_investments_doc(
     try:
         lots = [
             Lot(
-                ticker=str(entry["ticker"]).upper(),
+                ticker=normalize(entry["ticker"]),
                 money_in=float(entry["money_in"]),
                 buy_date=str(entry["buy_date"]),
                 money_out=(
