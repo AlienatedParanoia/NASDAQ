@@ -26,11 +26,9 @@ import numpy as np
 import pandas as pd
 
 import paths
-from classifier.classify import Bucket
 from data.fetcher import DataFetcher, FetchError, StockData
 from portfolio.cash import CashFlow
 from portfolio.storage import backup_file, read_json_or_backup, write_json_atomic
-from signals.signal_generator import ScanRow, Signal, generate_signal
 from strategies.backtest_engine import perf_stats, time_base
 
 log = logging.getLogger(__name__)
@@ -64,7 +62,9 @@ class Lot:
     buy_date: str                    # ISO YYYY-MM-DD
     money_out: float | None = None   # explicit proceeds; None = value at the sell close
     sell_date: str | None = None     # set = position closed
-    strategy: str | None = None      # a Bucket value string; None = recommended
+    # legacy tag from the signal era: persisted verbatim so existing files
+    # round-trip unchanged, but nothing reads it any more
+    strategy: str | None = None
     # ordering within the cash ledger (portfolio/cash.py): the buy debits the
     # balance, the sale credits it, and these break ties between events that
     # share a date so a replay is stable across loads
@@ -181,8 +181,7 @@ class LotResult:
     annualized: float | None         # None when held < MIN_ANNUALIZE_DAYS
     ann_vol: float | None            # over the actual holding window
     max_dd: float | None
-    signal: Signal | None            # current recommendation (open lots only)
-    scan_row: ScanRow | None = None  # for the detail chart (open lots only)
+    prices: pd.DataFrame | None = None  # for the detail chart (open lots only)
     buy_eff: pd.Timestamp | None = None
     note: str | None = None          # e.g. buy date clamped to history
     error: str | None = None
@@ -217,7 +216,7 @@ class InvestmentReport:
 def _error_result(lot: Lot, error: str) -> LotResult:
     return LotResult(
         lot=lot, shares=None, worth=None, pnl=None, ret=None, annualized=None,
-        ann_vol=None, max_dd=None, signal=None, error=error,
+        ann_vol=None, max_dd=None, error=error,
     )
 
 
@@ -286,19 +285,8 @@ def _analyze_lot(lot: Lot, data: StockData) -> tuple[LotResult, pd.Series]:
         _, ppy = time_base(r)
         ann_vol = float(r.std(ddof=1) * np.sqrt(ppy))
 
-    signal = scan_row = None
-    if not lot.is_sold:
-        # the trend the user invested under decides the recommendation; None
-        # lets classify() pick the suitable algorithm
-        try:
-            override = Bucket(lot.strategy) if lot.strategy else None
-        except ValueError:
-            log.warning(
-                "%s: unknown strategy %r, using recommended", lot.ticker, lot.strategy
-            )
-            override = None
-        scan_row = generate_signal(data, 10, strategy_override=override)
-        signal = scan_row.signal
+    # a sold lot is frozen on the books, so it gets no live chart
+    chart_prices = None if lot.is_sold else data.prices
 
     # contribution to V(t): cash before buying, market value while held,
     # realized proceeds afterwards
@@ -319,7 +307,7 @@ def _analyze_lot(lot: Lot, data: StockData) -> tuple[LotResult, pd.Series]:
     result = LotResult(
         lot=lot, shares=shares, worth=worth, pnl=pnl, ret=ret,
         annualized=annualized, ann_vol=ann_vol, max_dd=max_dd,
-        signal=signal, scan_row=scan_row, buy_eff=buy_eff,
+        prices=chart_prices, buy_eff=buy_eff,
         note="; ".join(notes) if notes else None,
     )
     return result, value

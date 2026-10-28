@@ -1,8 +1,8 @@
 """Shared technical indicators (pure pandas/numpy, Wilder conventions).
 
-Both the classifier and the strategies import from here so every consumer
-sees identical values. All functions return series aligned to the input
-index, with NaN during their warmup window.
+Every strategy imports from here, so every consumer sees identical values.
+All functions return series aligned to the input index, with NaN during their
+warmup window.
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def annualized_vol(close: pd.Series, window: int = 200) -> pd.Series:
     annualization used by the backtest engine and portfolio math. For real
     US-equity data (~252 trading days/yr) the factor is √252; a crypto or
     foreign listing with a different calendar is scaled correctly instead of
-    understated — which matters because the classifier gates buckets on this
+    understated — which matters because position sizing gates on this
     value."""
     _, ppy = time_base(close)
     return close.pct_change().rolling(window, min_periods=window).std(ddof=1) * np.sqrt(ppy)

@@ -1,9 +1,9 @@
 """yfinance wrapper with a SQLite cache.
 
 Prices: up to ten years of daily OHLCV per ticker (auto-adjusted close, so
-dividends are folded in); younger listings get whatever history exists. Fundamentals: the valuation/growth/balance-sheet snapshot the
-classifier and long-term scorer need. Both are cached in SQLite and refreshed
-only when the cached copy is more than a day old.
+dividends are folded in); younger listings get whatever history exists.
+Fundamentals: a valuation/growth/balance-sheet snapshot. Both are cached in
+SQLite and refreshed only when the cached copy is more than a day old.
 
 Yahoo specifics this module encodes (verified against yfinance 1.5.1):
   - requests must be paced (~1/s) and not parallelized, or Yahoo rate-limits;

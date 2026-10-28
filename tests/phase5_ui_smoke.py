@@ -1,6 +1,7 @@
-"""Phase 5 smoke test on the offscreen Qt platform: drives a scan over a small
-cached subset, verifies live row insertion, numeric sorting, filtering, and
-the detail panel, then saves a screenshot for visual inspection.
+"""Phase 5 smoke test on the offscreen Qt platform: drives a watchlist refresh
+over a small cached subset, verifies live row insertion, numeric sorting,
+filtering, and the detail chart, then exercises the My Investments tab and
+saves a screenshot for visual inspection.
 
 Run from the project root: python -m tests.phase5_ui_smoke
 """
@@ -47,31 +48,32 @@ def main() -> None:
     win = mw.MainWindow()
     win.show()
 
-    assert win._window_box.currentData() == 10, "default backtest window should be 10y"
-
-    win._start_scan()
-    assert not win._scan_btn.isEnabled(), "Scan button should disable during a scan"
+    win._start_refresh()
+    assert not win._refresh_btn.isEnabled(), "Refresh should disable during a refresh"
     deadline = time.monotonic() + 180
     while win._thread is not None and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.02)
-    assert win._thread is None, "scan did not finish within 180s"
-    assert win._scan_btn.isEnabled(), "Scan button should re-enable after the scan"
+    assert win._thread is None, "refresh did not finish within 180s"
+    assert win._refresh_btn.isEnabled(), "Refresh should re-enable afterwards"
     assert win._model.rowCount() == len(SUBSET), (
         f"expected {len(SUBSET)} rows, got {win._model.rowCount()}"
     )
-    print(f"scan finished with {win._model.rowCount()} rows; status: {win._status.text()}")
+    assert all(
+        win._model.row_at(r).error is None for r in range(win._model.rowCount())
+    ), "every cached subset ticker should load"
+    print(f"refresh finished with {win._model.rowCount()} rows; status: {win._status.text()}")
 
-    # numeric (not lexicographic) sort by Sharpe, descending
-    win._table.sortByColumn(4, Qt.SortOrder.DescendingOrder)
+    # numeric (not lexicographic) sort by Day change %, descending
+    win._table.sortByColumn(mw.C_CHANGE, Qt.SortOrder.DescendingOrder)
     app.processEvents()
     keys = []
     for r in range(win._proxy.rowCount()):
-        source = win._proxy.mapToSource(win._proxy.index(r, 4))
-        s = win._model.row_at(source.row()).sharpe
-        keys.append(s if s is not None else NEG_INF)
-    assert keys == sorted(keys, reverse=True), f"Sharpe sort not numeric: {keys}"
-    print(f"Sharpe sort OK: {['—' if k == NEG_INF else f'{k:.2f}' for k in keys]}")
+        source = win._proxy.mapToSource(win._proxy.index(r, mw.C_CHANGE))
+        change = win._model.row_at(source.row()).day_change
+        keys.append(change if change is not None else NEG_INF)
+    assert keys == sorted(keys, reverse=True), f"day-change sort not numeric: {keys}"
+    print(f"day-change sort OK: {['—' if k == NEG_INF else f'{k:+.2%}' for k in keys]}")
 
     # ticker substring filter
     win._proxy.set_ticker_filter("AA")
@@ -86,66 +88,96 @@ def main() -> None:
     assert win._proxy.rowCount() == len(SUBSET)
     print("ticker filter OK")
 
-    # row selection renders the detail panel
+    # row selection renders the detail chart
     win._table.selectRow(0)
     app.processEvents()
-    assert win._detail._text.toPlainText(), "detail reasoning empty after selection"
-    print("detail panel OK")
+    assert win._detail._plot.listDataItems(), "detail chart empty after selection"
+    assert win._detail._title.text() in SUBSET, win._detail._title.text()
+    print(f"detail chart OK for {win._detail._title.text()}")
 
-    # ---- Portfolio tab (real-position tracker) ----
+    # ---- My Investments tab (real-position tracker) ----
     import json as _json
+    from datetime import date as _date, timedelta as _timedelta
 
     import ui.investments_panel as ip
-    from PyQt6.QtCore import QDate
+
+    def _stub_add(ticker: str, money_in: float, buy: _date, sell=None):
+        """Stand in for the modal InvestmentDialog: exec() returns Accepted and
+        values() returns exactly what the user would have typed."""
+        ip.InvestmentDialog = lambda parent, edit=None: type(
+            "D", (), {
+                "exec": lambda self: ip.QDialog.DialogCode.Accepted,
+                "values": lambda self: (ticker, money_in, buy, sell, False),
+            },
+        )()
+
+    def _stub_sell(when: _date):
+        ip.SellDialog = lambda parent, lot: type(
+            "D", (), {
+                "exec": lambda self: ip.QDialog.DialogCode.Accepted,
+                "sell_date": lambda self: when,
+            },
+        )()
 
     tabs = win.centralWidget()
     ip.QMessageBox = type("MB", (), {"warning": staticmethod(lambda *a, **k: None)})
-    tabs.setCurrentIndex(3)  # Scanner | Daily Report | Paper Trading | My Investments
+    tabs.setCurrentIndex(1)  # Watchlist | My Investments
     inv = win._investments
     assert inv._table.rowCount() == 0
-    inv._ticker_edit.setText("AAPL")
-    inv._in_spin.setValue(1000)
-    inv._buy_date.setDate(QDate.currentDate().addYears(-1))
-    inv._on_add()
+
+    a_year_ago = _date.today() - _timedelta(days=365)
+    _stub_add("AAPL", 1000.0, a_year_ago)
+    inv._on_new_investment()
     _wait_panel_idle(app, inv)
-    inv._ticker_edit.setText("MSFT")
-    inv._in_spin.setValue(1500)
-    inv._buy_date.setDate(QDate.currentDate().addYears(-1))
-    inv._sold_check.setChecked(True)
-    inv._out_spin.setValue(2000)
-    inv._on_add()
+    _stub_add("MSFT", 1500.0, a_year_ago, sell=_date.today() - _timedelta(days=30))
+    inv._on_new_investment()
     _wait_panel_idle(app, inv)
+
     assert inv._table.rowCount() == 2, inv._table.rowCount()
     inv_summary = inv._summary.text()
     assert "Put in $2,500" in inv_summary and "since" in inv_summary, inv_summary
     msft = next(r for r in inv._report.results if r.lot.ticker == "MSFT")
-    assert abs(msft.pnl - 500.0) < 1e-9, msft.pnl
+    assert msft.error is None and msft.worth > 0, msft
+    assert msft.prices is None, "a sold lot carries no chart data"
+    aapl = next(r for r in inv._report.results if r.lot.ticker == "AAPL")
+    assert aapl.prices is not None, "an open lot carries its prices for the chart"
     print(f"investments summary OK: {inv_summary[:110]}…")
 
-    # sell flow on the open AAPL lot
-    ip.QInputDialog = type(
-        "QID", (), {"getDouble": staticmethod(lambda *a, **k: (1750.0, True))}
-    )
+    # the cash ledger rendered: a buy with no cash on hand infers its own
+    # deposit, so each lot contributes a deposit leg and a buy leg. The maths
+    # itself is covered offline and exhaustively by phase11_real_pnl_check.
+    assert inv._ledger.rowCount() >= 4, inv._ledger.rowCount()
+    assert inv._cash_label.text(), "cash label empty after two buys"
+    print(f"cash ledger OK: {inv._ledger.rowCount()} rows, {inv._cash_label.text()}")
+
+    # sell flow on the open AAPL lot: SellDialog takes only a date, and the
+    # worker resolves that day's close into money_out
+    _stub_sell(_date.today() - _timedelta(days=7))
     aapl_lot = next(l for l in inv._lots if l.ticker == "AAPL")
     inv._on_sell(aapl_lot)
     _wait_panel_idle(app, inv)
-    assert aapl_lot.money_out == 1750.0 and aapl_lot.sell_date
-    aapl_res = next(r for r in inv._report.results if r.lot.ticker == "AAPL")
-    assert abs(aapl_res.pnl - 750.0) < 1e-9
+    assert aapl_lot.sell_date, "sell date not recorded"
+    assert aapl_lot.money_out and aapl_lot.money_out > 0, (
+        f"worker did not resolve the sell close into money_out: {aapl_lot.money_out}"
+    )
     aapl_row = next(
         i for i in range(inv._table.rowCount())
         if inv._table.item(i, 0).text() == "AAPL"
     )
-    assert inv._table.cellWidget(aapl_row, 10) is None, (
-        "stale Sell button survived the open->sold re-render"
+    # read the column off the panel rather than hardcoding it, so the next
+    # column change cannot silently turn this into a no-op check
+    sell_cell = inv._table.cellWidget(aapl_row, ip.C_SELL)
+    assert isinstance(sell_cell, ip.QPushButton) and sell_cell.text() == "Undo sale", (
+        "a sold lot should offer Undo sale, not a stale Sell button"
     )
-    print("sell flow OK: AAPL closed at entered proceeds, Sell button removed")
+    print(
+        f"sell flow OK: AAPL closed on {aapl_lot.sell_date} at "
+        f"${aapl_lot.money_out:,.0f}, Sell button replaced by Undo sale"
+    )
 
     # bogus ticker never persisted
-    inv._sold_check.setChecked(False)
-    inv._ticker_edit.setText("QQFAKE55")
-    inv._in_spin.setValue(500)
-    inv._on_add()
+    _stub_add("QQFAKE55", 500.0, a_year_ago)
+    inv._on_new_investment()
     for _ in range(4):
         _wait_panel_idle(app, inv)
         if inv._thread is None and not inv._dirty and not inv._pending:

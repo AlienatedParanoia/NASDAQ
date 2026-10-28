@@ -1,17 +1,19 @@
-"""Detail panel: pyqtgraph price chart (close + bucket overlays + entry/exit
-markers from the backtest) above the reasoning text."""
+"""Detail panel: a pyqtgraph close-price chart for one ticker.
+
+Deliberately minimal after the signal system was removed — it takes a ticker
+and its raw price frame and draws the close line. Phase 6 grows this into the
+brokerage-style chart (candlesticks, ledger fill markers, indicator overlays).
+"""
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QLabel, QTextBrowser, QVBoxLayout, QWidget
-
-from signals.signal_generator import ScanRow
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 pg.setConfigOptions(antialias=True, background="w", foreground="k")
 
-OVERLAY_COLORS = ("#1f77b4", "#ff7f0e", "#9467bd", "#8c564b")
-PLACEHOLDER = "Select a row to see the chart and reasoning."
+PLACEHOLDER = "Select a row to see its chart."
 
 
 def _epoch_seconds(values) -> np.ndarray:
@@ -27,68 +29,29 @@ class DetailPanel(QWidget):
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         self._plot.showGrid(x=True, y=True, alpha=0.2)
         self._legend = self._plot.addLegend(offset=(10, 10))
-        self._text = QTextBrowser()
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._title)
-        layout.addWidget(self._plot, 3)
-        layout.addWidget(self._text, 1)
+        layout.addWidget(self._plot, 1)
 
     def clear(self) -> None:
         self._plot.clear()
         self._legend.clear()
-        self._text.clear()
         self._title.setText(PLACEHOLDER)
 
-    def show_row(self, row: ScanRow) -> None:
+    def show_prices(self, ticker: str, prices: pd.DataFrame | None) -> None:
+        """Named show_prices, not show: QWidget.show already means something."""
         self._plot.clear()
         self._legend.clear()
+        self._title.setText(ticker)
 
-        title = f"{row.ticker} — {row.bucket}"
-        if row.signal is not None:
-            title += f" — {row.signal}"
-        self._title.setText(title)
-        self._text.setPlainText(row.reasoning)
-
-        if row.prices is None or row.prices.empty:
+        if prices is None or prices.empty:
             return
 
-        x = _epoch_seconds(row.prices.index)
         self._plot.plot(
-            x,
-            row.prices["close"].to_numpy(),
+            _epoch_seconds(prices.index),
+            prices["close"].to_numpy(dtype=float),
             pen=pg.mkPen("#000000", width=2),
             name="Close",
             connect="finite",
         )
-        for (name, series), color in zip(row.overlay.items(), OVERLAY_COLORS):
-            aligned = series.reindex(row.prices.index)
-            self._plot.plot(
-                x,
-                aligned.to_numpy(dtype=float),
-                pen=pg.mkPen(color, width=1),
-                name=name,
-                connect="finite",
-            )
-
-        entries_x, entries_y, exits_x, exits_y = [], [], [], []
-        for trade in row.trades:
-            entries_x.append(trade.entry_date.value / 1e9)
-            entries_y.append(trade.entry_price)
-            if trade.exit_date is not None:
-                exits_x.append(trade.exit_date.value / 1e9)
-                exits_y.append(trade.exit_price)
-        if entries_x:
-            item = pg.ScatterPlotItem(
-                x=entries_x, y=entries_y, symbol="t1", size=13,
-                brush=pg.mkBrush("#1e8e3e"), pen=pg.mkPen("k"),
-            )
-            self._plot.addItem(item)
-            self._legend.addItem(item, "Entry")
-        if exits_x:
-            item = pg.ScatterPlotItem(
-                x=exits_x, y=exits_y, symbol="t", size=13,
-                brush=pg.mkBrush("#d93025"), pen=pg.mkPen("k"),
-            )
-            self._plot.addItem(item)
-            self._legend.addItem(item, "Exit")

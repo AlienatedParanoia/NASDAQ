@@ -39,12 +39,6 @@ def investments_path() -> Path:
     return data_dir() / "investments.json"
 
 
-def paper_trading_path() -> Path:
-    # a forward-simulated paper trading session — user data, separate from
-    # cache.db (which is wiped on CACHE_VERSION bumps) like investments.json
-    return data_dir() / "paper_trading.json"
-
-
 def setup_logging(level: int = logging.INFO) -> None:
     """File logging always (a --windowed exe has no stderr), console in dev."""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")

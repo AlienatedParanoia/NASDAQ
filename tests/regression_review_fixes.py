@@ -1,6 +1,10 @@
-"""Regression checks for the four defects confirmed by the pre-packaging
-adversarial review (trade-fill offset, drawdown peak seeding, negative-PEG
-polarity, uninterruptible rate-limit backoff). Offline.
+"""Regression checks for the defects confirmed by the pre-packaging
+adversarial review (trade-fill offset, drawdown peak seeding, calendar-aware
+CAGR, uninterruptible rate-limit backoff). Offline.
+
+The negative-PEG polarity check went with strategies/long_term.py when the
+signal system was removed in phase 0; the fundamentals scoring it guarded no
+longer exists.
 
 Run from the project root: python -m tests.regression_review_fixes
 """
@@ -12,9 +16,8 @@ import numpy as np
 import pandas as pd
 
 import paths
-from data.fetcher import DataFetcher, FetchError, Fundamentals
+from data.fetcher import DataFetcher, FetchError
 from strategies.backtest_engine import run_backtest
-from strategies.long_term import _valuation, composite_score
 
 
 def _df(closes) -> pd.DataFrame:
@@ -48,24 +51,6 @@ def drawdown_includes_starting_capital() -> None:
     assert abs(bt.max_drawdown - (-0.19)) < 1e-9, bt.max_drawdown
     assert abs(bt.bh_max_drawdown - (-0.19)) < 1e-9
     print(f"drawdown measured from starting capital: {bt.max_drawdown:.1%}")
-
-
-def negative_peg_is_not_a_buy_signal() -> None:
-    assert _valuation(None, -1.0) == 0.0
-    assert _valuation(-5.0, None) == 0.0
-    assert _valuation(28.0, -2.1) < _valuation(28.0, None), "negative PEG must hurt"
-
-    def fund(peg):
-        return Fundamentals(
-            ticker="X", pe=28.0, peg=peg, revenue_growth=0.06,
-            earnings_growth=-0.15, debt_to_equity=0.5, profit_margins=0.15,
-            beta=1.0, sector=None,
-        )
-
-    score_bad, _, _ = composite_score(fund(-2.1))
-    score_missing, _, _ = composite_score(fund(None))
-    assert score_bad < score_missing, (score_bad, score_missing)
-    print(f"negative PEG composite {score_bad:.1f} < missing-PEG {score_missing:.1f}")
 
 
 def cagr_annualizes_correctly() -> None:
@@ -113,7 +98,6 @@ def backoff_interruptible_and_breaker_fails_fast() -> None:
 def main() -> None:
     trade_fills_reconcile()
     drawdown_includes_starting_capital()
-    negative_peg_is_not_a_buy_signal()
     cagr_annualizes_correctly()
     backoff_interruptible_and_breaker_fails_fast()
     print("REVIEW-FIX REGRESSION CHECKS PASSED")

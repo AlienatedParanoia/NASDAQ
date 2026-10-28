@@ -75,7 +75,7 @@ def sold_lot_uses_entered_amounts(fetcher: DataFetcher) -> None:
     assert abs(res.pnl - 500.0) < 1e-9, "sold P&L must use the entered amounts"
     assert abs(res.ret - 500.0 / 1500.0) < 1e-12
     assert res.ann_vol is not None and res.max_dd is not None
-    assert res.signal is None, "sold lots get no live signal"
+    assert res.prices is None, "sold lots get no live chart"
     print(f"sold lot OK: entered 1500->2000 gives P&L +500, risk {res.ann_vol:.0%}/yr")
 
 

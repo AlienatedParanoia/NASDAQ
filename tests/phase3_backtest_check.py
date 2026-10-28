@@ -14,7 +14,6 @@ import paths
 from data.fetcher import DataFetcher, FetchError
 from data.universe import NASDAQ_100
 from strategies.backtest_engine import run_backtest
-from strategies.long_term import LongTermStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.trend import TrendStrategy
 
@@ -73,7 +72,6 @@ def main() -> None:
     strategies = {
         "trend": TrendStrategy(),
         "mean_reversion": MeanReversionStrategy(),
-        "long_term": LongTermStrategy(),
     }
     suspicious: list[tuple[str, str, float, int]] = []
     checked = 0

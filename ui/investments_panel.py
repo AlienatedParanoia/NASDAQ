@@ -1,12 +1,11 @@
 """My Investments tab: real-money lot tracking.
 
-Each row is an actual investment the user made: money in on a buy date, under
-a chosen trend, and — once sold — a sell date. Open lots are valued live from
-the latest cached close; sold lots freeze at the close on the day they were
-sold, keeping the return they had earned and staying on the books. Same
-worker/pending-validation architecture as the paper-portfolio panel: all
-fetching happens on a QThread, and a new ticker is only persisted after a
-worker report proves Yahoo knows it.
+Each row is an actual investment the user made: money in on a buy date and —
+once sold — a sell date. Open lots are valued live from the latest cached
+close; sold lots freeze at the close on the day they were sold, keeping the
+return they had earned and staying on the books. All fetching happens on a
+QThread, and a new ticker is only persisted after a worker report proves
+Yahoo knows it.
 
 The account also holds uninvested cash. Buying spends it, selling refills it,
 and it only grows from outside via an explicit Deposit — so a position funded
@@ -26,7 +25,6 @@ from typing import Sequence
 from PyQt6.QtCore import QDate, QObject, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -69,27 +67,18 @@ from portfolio.tracker import (
     looks_transient,
     save_investments,
 )
-from ui.common import (
-    GREEN,
-    GREY,
-    RED,
-    SIGNAL_COLORS,
-    STRATEGY_CHOICES,
-    money,
-    strategy_choice_index,
-    strategy_choice_label,
-)
+from ui.common import GREEN, GREY, RED, money
 from ui.detail_panel import DetailPanel
 
 log = logging.getLogger(__name__)
 
 COLS = (
-    "Ticker", "Put in", "Funded", "Bought", "Trend", "Worth / Out", "P&L",
-    "Return", "/yr", "Risk", "Max DD", "Signal", "Sell", "", "",
+    "Ticker", "Put in", "Funded", "Bought", "Worth / Out", "P&L",
+    "Return", "/yr", "Risk", "Max DD", "Sell", "", "",
 )
 (
-    C_TICKER, C_IN, C_FUNDED, C_BOUGHT, C_TREND, C_WORTH, C_PNL, C_RETURN,
-    C_YR, C_RISK, C_MAXDD, C_SIGNAL, C_SELL, C_EDIT, C_REMOVE,
+    C_TICKER, C_IN, C_FUNDED, C_BOUGHT, C_WORTH, C_PNL, C_RETURN,
+    C_YR, C_RISK, C_MAXDD, C_SELL, C_EDIT, C_REMOVE,
 ) = range(len(COLS))
 
 # the cash ledger, exactly as portfolio/cash.py replays it
@@ -115,7 +104,7 @@ class Snapshot:
     pending: set[str]
 
 # every stat column, blanked out when a lot has no data
-_STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD, C_SIGNAL)
+_STAT_COLS = (C_PNL, C_RETURN, C_YR, C_RISK, C_MAXDD)
 
 
 def _display_date(iso: str) -> str:
@@ -167,9 +156,6 @@ class InvestmentDialog(QDialog):
         self._buy_date.setCalendarPopup(True)
         self._buy_date.setMaximumDate(today)
         self._buy_date.setDisplayFormat("dd/MM/yy")
-        self._strategy = QComboBox()
-        for label, value in STRATEGY_CHOICES:
-            self._strategy.addItem(label, value)
         self._sold_check = QCheckBox("I have already sold this")
         self._sold_check.toggled.connect(self._on_sold_toggled)
         self._sell_date = QDateEdit(today)
@@ -189,14 +175,12 @@ class InvestmentDialog(QDialog):
             self._buy_date.setDate(
                 QDate.fromString(edit.buy_date, Qt.DateFormat.ISODate)
             )
-            self._strategy.setCurrentIndex(strategy_choice_index(edit.strategy))
             self._from_profit.setChecked(edit.from_profit)
 
         form = QFormLayout()
         form.addRow("Ticker", self._ticker)
         form.addRow("Money in", self._money_in)
         form.addRow("Bought on", self._buy_date)
-        form.addRow("Trend", self._strategy)
         form.addRow("", self._from_profit)
         if edit is None:
             form.addRow("", self._sold_check)
@@ -240,7 +224,7 @@ class InvestmentDialog(QDialog):
             return
         self.accept()
 
-    def values(self) -> tuple[str, float, date, str | None, date | None, bool]:
+    def values(self) -> tuple[str, float, date, date | None, bool]:
         # the sold fields are not shown when editing, so an edit never closes
         # a position — that is what the Sell button is for
         sold = self._sold_check.isChecked() and not self._editing
@@ -248,7 +232,6 @@ class InvestmentDialog(QDialog):
             self._ticker.text().strip().upper(),
             float(self._money_in.value()),
             self._buy_date.date().toPyDate(),
-            self._strategy.currentData(),
             self._sell_date.date().toPyDate() if sold else None,
             self._from_profit.isChecked(),
         )
@@ -887,7 +870,7 @@ class InvestmentsPanel(QWidget):
         dialog = InvestmentDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        ticker, money_in, buy, strategy, sell, from_profit = dialog.values()
+        ticker, money_in, buy, sell, from_profit = dialog.values()
         if not ticker:
             return
         seq = next_seq(self._lots, self._flows)
@@ -896,7 +879,6 @@ class InvestmentsPanel(QWidget):
             money_in=money_in,
             buy_date=buy.isoformat(),
             sell_date=sell.isoformat() if sell is not None else None,
-            strategy=strategy,
             buy_seq=seq,
             sell_seq=seq + 1 if sell is not None else None,
             from_profit=from_profit,
@@ -939,12 +921,12 @@ class InvestmentsPanel(QWidget):
         dialog = InvestmentDialog(self, edit=lot)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        _, money_in, buy, strategy, _, from_profit = dialog.values()
+        _, money_in, buy, _, from_profit = dialog.values()
         updated = Lot(
             ticker=lot.ticker,          # fixed: already validated against Yahoo
             money_in=money_in,
             buy_date=buy.isoformat(),
-            strategy=strategy,
+            strategy=lot.strategy,      # legacy tag, carried through untouched
             buy_seq=lot.buy_seq,        # keeps its place among same-date events
             from_profit=from_profit,
         )
@@ -956,7 +938,6 @@ class InvestmentsPanel(QWidget):
         self._generation += 1
         lot.money_in = money_in
         lot.buy_date = updated.buy_date
-        lot.strategy = strategy
         lot.from_profit = from_profit
         self._persist()
         self.recompute()
@@ -1251,7 +1232,6 @@ class InvestmentsPanel(QWidget):
             if lot.is_sold:
                 bought += f" → {_display_date(lot.sell_date) if lot.sell_date else '?'}"
             self._set_item(i, C_BOUGHT, bought)
-            self._set_item(i, C_TREND, strategy_choice_label(lot.strategy))
             if res.error is not None:
                 self._set_item(i, C_WORTH, "no data")
                 for col in _STAT_COLS:
@@ -1272,10 +1252,6 @@ class InvestmentsPanel(QWidget):
                 self._set_item(
                     i, C_MAXDD, f"{res.max_dd:.1%}" if res.max_dd is not None else "—"
                 )
-                sig_item = QTableWidgetItem(str(res.signal) if res.signal else "—")
-                if res.signal is not None:
-                    sig_item.setForeground(SIGNAL_COLORS[res.signal])
-                self._table.setItem(i, C_SIGNAL, sig_item)
             if not lot.is_sold and res.error is None:
                 sell_btn = QPushButton("Sell…")
                 sell_btn.clicked.connect(lambda _c, l=lot: self._on_sell(l))
@@ -1381,7 +1357,7 @@ class InvestmentsPanel(QWidget):
         i = indexes[0].row()
         if 0 <= i < len(self._report.results):
             res = self._report.results[i]
-            if res.scan_row is not None:
-                self._detail.show_row(res.scan_row)
+            if res.prices is not None:
+                self._detail.show_prices(res.lot.ticker, res.prices)
             else:
                 self._detail.clear()

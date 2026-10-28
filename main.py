@@ -19,7 +19,6 @@ def _selftest() -> int:
     import logging
 
     from data.fetcher import DataFetcher
-    from signals.signal_generator import generate_signal
     from tests.phase11_real_pnl_check import run_scenarios
 
     log = logging.getLogger("selftest")
@@ -27,11 +26,11 @@ def _selftest() -> int:
         run_scenarios()
         log.info("selftest OK: real-investment P&L scenarios pass")
         fetcher = DataFetcher(paths.db_path())
-        row = generate_signal(fetcher.get_stock("AAPL", force=True))
+        data = fetcher.get_stock("AAPL", force=True)
         fetcher.close()
         log.info(
-            "selftest OK: %s bucket=%s signal=%s bars=%d",
-            row.ticker, row.bucket, row.signal, len(row.prices),
+            "selftest OK: %s fetched, %d bars through %s",
+            data.ticker, len(data.prices), data.prices.index[-1].date(),
         )
         return 0
     except Exception:

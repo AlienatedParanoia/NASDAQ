@@ -1,5 +1,8 @@
-"""Phase 2 sanity check, part 2 (network): classify the full NASDAQ-100 and
-print the bucket distribution.
+"""Phase 2 sanity check, part 2 (network): fetch the full NASDAQ-100 and report
+what came back.
+
+Reduced to a data check in phase 0, when the classifier it used to exercise was
+removed; phase 2 rewrites it around the S&P 500 + NASDAQ-100 union.
 
 The first run performs the cold fetch (~5-8 min at rate-limit-safe pacing);
 subsequent runs hit the SQLite cache. Run from the project root:
@@ -10,9 +13,10 @@ from __future__ import annotations
 import logging
 
 import paths
-from classifier.classify import Bucket, classify, compute_metrics
 from data.fetcher import DataFetcher, FetchError, configure_yfinance
 from data.universe import NASDAQ_100
+
+MIN_BARS = 200  # anything thinner than ~10 months is a broken fetch, not a young listing
 
 
 def main() -> None:
@@ -20,40 +24,37 @@ def main() -> None:
     configure_yfinance(paths.data_dir())
     fetcher = DataFetcher(paths.db_path())
 
-    buckets: dict[Bucket, list[str]] = {b: [] for b in Bucket}
+    total = len(NASDAQ_100)
+    bars: dict[str, int] = {}
     failures: list[str] = []
+    thin: list[tuple[str, int]] = []
     for i, t in enumerate(NASDAQ_100, 1):
         try:
             data = fetcher.get_stock(t)
         except FetchError as e:
             failures.append(t)
-            print(f"[{i:3d}/101] {t}: SKIPPED ({e})", flush=True)
+            print(f"[{i:3d}/{total}] {t}: SKIPPED ({e})", flush=True)
             continue
-        bucket, reason = classify(compute_metrics(data))
-        buckets[bucket].append(t)
-        print(f"[{i:3d}/101] {t}: {bucket} — {reason}", flush=True)
+        prices = data.prices
+        bars[t] = len(prices)
+        if len(prices) < MIN_BARS:
+            thin.append((t, len(prices)))
+        print(
+            f"[{i:3d}/{total}] {t}: {len(prices)} bars, "
+            f"last close ${float(prices['close'].iloc[-1]):,.2f} "
+            f"on {prices.index[-1].date()}",
+            flush=True,
+        )
     fetcher.close()
 
     print()
-    counts = {str(b): len(v) for b, v in buckets.items()}
-    print(f"distribution: {counts}")
-    print(f"failures ({len(failures)}): {failures}")
-    for b, members in buckets.items():
-        print(f"{b}: {', '.join(members) if members else '(none)'}")
+    print(f"fetched {len(bars)}/{total}; failures ({len(failures)}): {failures}")
+    if thin:
+        print(f"short histories (recent listings, worth a look): {thin}")
 
-    assert sum(len(v) for v in buckets.values()) + len(failures) == 101
+    assert len(bars) + len(failures) == total
     assert len(failures) <= 6, f"too many fetch failures: {failures}"
-    for b, members in buckets.items():
-        assert len(members) < 90, f"bucket {b} absurdly dominant: {len(members)}/101"
-    assert len(buckets[Bucket.UNCLASSIFIED]) < 60, "Unclassified holds the majority"
-    for b, members in buckets.items():
-        if not members:
-            print(f"WARNING: bucket {b} is empty — worth a look, not necessarily a bug")
-
-    for hot in ("PLTR", "MSTR"):
-        assert hot not in buckets[Bucket.LONG_TERM], (
-            f"{hot} classified Long-term — its vol/beta should have excluded it"
-        )
+    assert len(thin) <= 10, f"too many short histories: {thin}"
 
     print("PHASE 2 UNIVERSE CHECKS PASSED")
 
