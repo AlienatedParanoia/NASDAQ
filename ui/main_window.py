@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -40,7 +41,7 @@ from PyQt6.QtWidgets import (
 
 import paths
 from data.fetcher import DataFetcher, FetchError
-from data.universe import get_universe
+from data.universe import SURVIVORSHIP_NOTE, describe, get_universe
 from ui.common import GREEN, RED
 from ui.detail_panel import DetailPanel
 from ui.investments_panel import InvestmentsPanel
@@ -52,7 +53,14 @@ C_TICKER, C_CLOSE, C_CHANGE, C_VOLUME = range(len(COLUMNS))
 
 DISCLAIMER = (
     "End-of-day Yahoo Finance data, ~15 min delayed and refreshed at most once "
-    "a day."
+    "a day. " + SURVIVORSHIP_NOTE
+)
+
+# toolbar label -> the indexes get_universe() should union
+UNIVERSE_CHOICES = (
+    ("S&P 500 + NASDAQ-100", ("sp500", "nasdaq100")),
+    ("S&P 500", ("sp500",)),
+    ("NASDAQ-100", ("nasdaq100",)),
 )
 
 
@@ -180,18 +188,27 @@ def load_watchlist(
 ) -> list[WatchlistRow]:
     """Fetch every ticker's latest bar. One failure never stops the sweep: the
     ticker gets an error row and the loop continues."""
-    rows: list[WatchlistRow] = []
     total = len(tickers)
+
+    # One batched, chunked, rate-limited pass for the whole universe instead of
+    # a request per ticker. At 518 symbols the per-ticker loop this replaced
+    # took minutes; the batch takes seconds and leaves every row a cache read.
+    if progress is not None:
+        progress(0, total, f"{total} symbols")
+    errors = fetcher.refresh(tickers)
+
+    rows: list[WatchlistRow] = []
     for i, ticker in enumerate(tickers, 1):
         if should_stop is not None and should_stop():
             break
         if progress is not None:
             progress(i, total, ticker)
         try:
-            row = build_row(ticker, fetcher.get_stock(ticker).prices)
+            prices = fetcher.get_stock(ticker).prices
+            row = build_row(ticker, prices)
         except FetchError as e:
             log.warning("%s: skipped from the watchlist: %s", ticker, e)
-            row = WatchlistRow(ticker=ticker, error=str(e))
+            row = WatchlistRow(ticker=ticker, error=errors.get(ticker, str(e)))
         except Exception as e:  # noqa: BLE001 — one ticker never kills the sweep
             log.exception("%s: watchlist row failed", ticker)
             row = WatchlistRow(ticker=ticker, error=str(e))
@@ -256,17 +273,27 @@ class MainWindow(QMainWindow):
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self._start_refresh)
 
+        self._universe_box = QComboBox()
+        for label, indexes in UNIVERSE_CHOICES:
+            self._universe_box.addItem(label, indexes)
+        self._universe_box.setToolTip(
+            "Which index members to list. Data is cached per ticker, so "
+            "switching re-uses whatever has already been fetched."
+        )
+        self._universe_box.currentIndexChanged.connect(self._on_universe_changed)
+
         self._filter_edit = QLineEdit()
         self._filter_edit.setPlaceholderText("Filter ticker…")
         self._filter_edit.textChanged.connect(self._proxy.set_ticker_filter)
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(self._refresh_btn)
+        toolbar.addWidget(self._universe_box)
         toolbar.addWidget(self._filter_edit, 1)
 
         self._progress = QProgressBar()
         self._progress.setVisible(False)
-        self._status = QLabel("Ready. Click Refresh to load the NASDAQ-100.")
+        self._status = QLabel(f"Ready. Click Refresh to load {describe()}.")
         self._status.setWordWrap(True)
 
         left_layout = QVBoxLayout()
@@ -293,12 +320,22 @@ class MainWindow(QMainWindow):
 
         self._thread: QThread | None = None
         self._worker: WatchlistWorker | None = None
+        self._has_loaded = False
 
     # refresh lifecycle ------------------------------------------------------
+    def selected_indexes(self) -> tuple[str, ...]:
+        return self._universe_box.currentData()
+
+    def _on_universe_changed(self, _index: int) -> None:
+        # only reload once the user has actually populated the table; otherwise
+        # changing the selector before the first Refresh would fire a fetch
+        if self._thread is None and self._has_loaded:
+            self._start_refresh()
+
     def _start_refresh(self) -> None:
         if self._thread is not None:
             return
-        universe = get_universe()
+        universe = get_universe(self.selected_indexes())
         self._model.clear()
         self._detail.clear()
         self._refresh_btn.setEnabled(False)
@@ -334,10 +371,14 @@ class MainWindow(QMainWindow):
         self._model.append_row(row)
 
     def _on_finished(self, rows: list) -> None:
+        self._has_loaded = True
         skipped = [r.ticker for r in rows if r.error]
-        msg = f"{len(rows) - len(skipped)} tickers loaded"
+        msg = f"{len(rows) - len(skipped)} of {describe(self.selected_indexes())} loaded"
         if skipped:
-            msg += f", {len(skipped)} skipped: {', '.join(skipped)}"
+            shown = ", ".join(skipped[:8])
+            if len(skipped) > 8:
+                shown += f", +{len(skipped) - 8} more"
+            msg += f", {len(skipped)} skipped: {shown}"
         self._status.setText(f"{msg}. {DISCLAIMER}")
         self._teardown_thread()
 

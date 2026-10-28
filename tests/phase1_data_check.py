@@ -17,7 +17,7 @@ import pandas as pd
 import paths
 from data.fetcher import DIVIDEND, SPLIT, DataFetcher, FetchError, configure_yfinance
 from data.symbols import normalize
-from data.universe import NASDAQ_100, get_universe
+from data.universe import describe, get_universe
 
 TICKERS = ["AAPL", "MSFT", "NVDA", "KHC"]
 BOGUS = "FAKETICKERXYZ"
@@ -29,10 +29,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     universe = get_universe()
-    assert len(NASDAQ_100) == 101, f"universe should have 101 symbols, got {len(NASDAQ_100)}"
-    assert len(universe) == 101, "normalisation changed the universe size"
+    ndx = get_universe(("nasdaq100",))
+    assert len(ndx) == 101, f"NASDAQ-100 should have 101 symbols, got {len(ndx)}"
+    assert len(universe) == len(set(universe)), "universe contains duplicates"
     assert all(t == normalize(t) for t in universe), "universe is not normalised"
-    print(f"universe OK: {len(universe)} unique normalised symbols")
+    print(f"universe OK: {len(universe)} unique normalised symbols ({describe()})")
 
     configure_yfinance(paths.data_dir())
     fetcher = DataFetcher(paths.db_path())

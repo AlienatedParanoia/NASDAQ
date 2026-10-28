@@ -12,7 +12,7 @@ import pandas as pd
 
 import paths
 from data.fetcher import DataFetcher, FetchError
-from data.universe import NASDAQ_100
+from data.universe import get_universe
 from strategies.backtest_engine import run_backtest
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.trend import TrendStrategy
@@ -75,7 +75,7 @@ def main() -> None:
     }
     suspicious: list[tuple[str, str, float, int]] = []
     checked = 0
-    for t in NASDAQ_100:
+    for t in get_universe(("nasdaq100",)):
         try:
             px = fetcher.get_stock(t).prices
         except FetchError:

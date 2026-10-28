@@ -2,14 +2,14 @@
 
 Desktop app (PyQt6 + pandas + yfinance + SQLite) with two tabs:
 
-- **Watchlist** — the NASDAQ-100 with each stock's last close, day change and
-  volume, off a daily SQLite cache, plus a price chart for the selected ticker.
+- **Watchlist** — the S&P 500 and/or NASDAQ-100 (selectable in the toolbar) with
+  each stock's last close, day change and volume, off a daily SQLite cache, plus
+  a price chart for the selected ticker.
 - **My Investments** — real-money lot tracking with a cash ledger.
 
 **Fake money and informational use only.** Price data is end-of-day Yahoo
-Finance, ~15 minutes delayed. Long windows also carry survivorship bias: the
-universe is *today's* index members — the winners — so historical returns read
-flattering.
+Finance, ~15 minutes delayed. See the survivorship-bias note under Universe:
+backtests on this universe read optimistic by construction.
 
 > **Conversion in progress.** The signal/recommendation system (classifier,
 > Buy/Hold/Avoid signals, Daily Report, old paper-trading simulator) was removed
@@ -26,9 +26,43 @@ python -m venv .venv
 .venv\Scripts\python main.py
 ```
 
-The first Refresh cold-fetches all 101 tickers (~16s, batched); results are
-cached in SQLite (`data/cache.db`) and refreshed at most once a day, so later
-refreshes are served from cache.
+The first Refresh cold-fetches the selected universe (batched; ~16s for the
+NASDAQ-100, longer for the full 518-symbol union); results are cached in SQLite
+(`data/cache.db`) and refreshed at most once a day, so later refreshes are
+served from cache.
+
+## Universe
+
+Membership lives in `data/constituents/sp500.csv` and `nasdaq100.csv` (columns
+`ticker,name,sector,date_added`), not in code, so a reconstitution arrives as a
+reviewable diff. The toolbar selects S&P 500, NASDAQ-100, or both; the union is
+**518 unique symbols** (503 + 101 − 86 in both).
+
+Rebuild the files from Wikipedia with:
+
+```
+.venv\Scripts\python scripts/refresh_constituents.py --dry-run   # show the diff
+.venv\Scripts\python scripts/refresh_constituents.py             # write it
+```
+
+It prints added / removed / renamed members and refuses to write a file that
+lost more than 10% of its members (`--force` overrides), since that is what a
+source-page restructure looks like rather than a real reconstitution.
+
+The two sources do not describe themselves identically: `sector` is GICS for the
+S&P 500 and ICB for the NASDAQ-100 — comparable within an index, not across —
+and `date_added` is empty for every NASDAQ-100 row because the source table has
+no such column. The full NASDAQ composite is deliberately **not** included.
+
+### Survivorship bias
+
+These files list *today's* members. A company that was in the S&P 500 in 2018 and
+then went bankrupt, got acquired, or was demoted is not here — and yfinance
+mostly cannot serve its prices anyway. Every historical backtest therefore runs
+on a pre-filtered list of survivors and **reads optimistically**: the losers were
+removed before the test began. Forward paper trading, where the universe is not
+yet known to have survived, is the honest test. This caveat is repeated in the
+app's Watchlist footer.
 
 ## Data
 
@@ -93,7 +127,9 @@ The earlier build phases each have a runnable script under `tests/` (run from th
 repo root with `python -m tests.<name>`): `phase1_data_check`,
 `phase2_indicator_check`, `phase2_universe_check`, `phase3_backtest_check`,
 `phase5_ui_smoke`, `phase7_investments_check`, `phase11_real_pnl_check`, and
-`regression_review_fixes`.
+`regression_review_fixes`. `phase2_universe_check` is the slow one — it
+cold-fetches the whole union, then proves a same-day re-read makes zero network
+calls.
 
 `phase11_real_pnl_check` is fully offline and covers the cash ledger and Real
 Investment P&L; its five scenarios also run inside `--selftest`, so a build

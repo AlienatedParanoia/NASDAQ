@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+# the index membership CSVs are read at runtime; without this they are simply
+# absent from the exe and the universe fails to load (see paths.resource_dir)
+datas = [('data/constituents/*.csv', 'data/constituents')]
 binaries = []
 hiddenimports = ['_cffi_backend', 'peewee', 'multitasking']
 tmp_ret = collect_all('yfinance')

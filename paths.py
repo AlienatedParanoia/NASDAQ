@@ -1,8 +1,16 @@
-"""Filesystem locations for the cache and logs, resolved for dev vs frozen builds.
+"""Filesystem locations for the cache, logs and bundled data files, resolved
+for dev vs frozen builds.
 
-Dev runs keep everything in the project's data/ directory. A PyInstaller build
-must not write next to the exe (Program Files is read-only), so frozen runs use
-%LOCALAPPDATA%\\nasdaq-advisor instead.
+Two different roots, and conflating them is a bug that shows up only in the
+packaged exe:
+
+  * **writable** state (cache.db, logs, investments.json) - dev runs keep it in
+    the project's data/ directory; a PyInstaller build must not write next to
+    the exe (Program Files is read-only), so frozen runs use the per-user
+    %LOCALAPPDATA% app directory instead. That is `data_dir()`.
+  * **read-only resources** shipped with the app (the index constituent CSVs) -
+    PyInstaller unpacks these into a temporary directory it advertises as
+    `sys._MEIPASS`, nowhere near %LOCALAPPDATA%. That is `resource_dir()`.
 """
 from __future__ import annotations
 
@@ -23,6 +31,24 @@ def data_dir() -> Path:
         d = Path(__file__).resolve().parent / "data"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def resource_dir() -> Path:
+    """Root for read-only files shipped with the app.
+
+    Deliberately NOT data_dir(): a frozen build unpacks bundled resources into
+    sys._MEIPASS, while data_dir() points at the writable %LOCALAPPDATA% cache.
+    Reading a shipped file through data_dir() works in dev and fails only once
+    packaged, which is the worst time to find out.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+def constituents_dir() -> Path:
+    """Where the index membership CSVs live (see data/universe.py)."""
+    return resource_dir() / "data" / "constituents"
 
 
 def db_path() -> Path:

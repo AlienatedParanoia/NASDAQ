@@ -25,6 +25,7 @@ def _selftest() -> int:
 
     from data import calendar as market_calendar
     from data.fetcher import DataFetcher
+    from data.universe import describe, get_universe
     from tests.phase11_real_pnl_check import run_scenarios
 
     log = logging.getLogger("selftest")
@@ -38,6 +39,12 @@ def _selftest() -> int:
         assert market_calendar.is_early_close("2025-11-28")
         session = market_calendar.latest_complete_session()
         log.info("selftest OK: XNYS calendar loaded, latest complete session %s", session)
+
+        # the constituent CSVs are bundled data, not code: a packaging miss
+        # leaves the exe importable and the universe empty
+        universe = get_universe()
+        assert len(universe) > 400, f"universe looks truncated: {len(universe)}"
+        log.info("selftest OK: universe loaded, %s", describe())
 
         fetcher = DataFetcher(paths.db_path())
         data = fetcher.get_stock("AAPL", force=True)

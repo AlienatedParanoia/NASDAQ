@@ -42,7 +42,8 @@ def main() -> None:
 
     import ui.main_window as mw
 
-    mw.get_universe = lambda: list(SUBSET)  # patch in a small, cached universe
+    # patch in a small, cached universe (the real one is ~518 symbols)
+    mw.get_universe = lambda indexes=None: list(SUBSET)
 
     app = QApplication([])
     win = mw.MainWindow()
@@ -74,6 +75,20 @@ def main() -> None:
         keys.append(change if change is not None else NEG_INF)
     assert keys == sorted(keys, reverse=True), f"day-change sort not numeric: {keys}"
     print(f"day-change sort OK: {['—' if k == NEG_INF else f'{k:+.2%}' for k in keys]}")
+
+    # universe selector: three choices, and switching re-runs the load
+    labels = [win._universe_box.itemText(i) for i in range(win._universe_box.count())]
+    assert labels == ["S&P 500 + NASDAQ-100", "S&P 500", "NASDAQ-100"], labels
+    assert win.selected_indexes() == ("sp500", "nasdaq100"), win.selected_indexes()
+    win._universe_box.setCurrentIndex(2)  # NASDAQ-100
+    assert win.selected_indexes() == ("nasdaq100",)
+    deadline = time.monotonic() + 180
+    while win._thread is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    assert win._thread is None, "selector-triggered reload did not finish"
+    assert win._model.rowCount() == len(SUBSET)
+    print(f"universe selector OK: {labels}")
 
     # ticker substring filter
     win._proxy.set_ticker_filter("AA")
