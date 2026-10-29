@@ -241,6 +241,46 @@ is unfair, and what the remaining difference is made of.
 Replay inherits the survivorship bias described under Universe, so its numbers
 read optimistically by construction.
 
+### Running daily (forward paper trading)
+
+`python -m bots.run_daily` advances every enabled bot through every session it
+owes, against the **forward** ledger (`data/ledger.db`) — this is what turns
+the simulator into something that actually runs, unattended, forever. It calls
+the same `Bot.run_session` as replay, through `data.calendar.latest_complete_
+session()` so it never acts on a bar still forming.
+
+```
+python -m bots.run_daily               # advance every enabled bot
+python -m bots.run_daily --dry-run     # compute everything, write nothing
+python -m bots.run_daily --bot NAME    # just one bot
+python -m bots.run_daily --no-fetch    # use the price cache as-is
+python -m bots.run_daily --until DATE  # pretend DATE is the latest session
+```
+
+Each bot's each session runs inside one ledger transaction
+(`Ledger.transaction()`): a crash rolls that session back in full — including
+the broker's own mark-to-market and cursor advance — so the next run retries
+it from exactly where this one started, never half-applied. A bot's own
+cursor (`last_processed_session`) is what decides what is left to do, so
+re-running the same day is a no-op and a missed day is simply more sessions to
+walk next time — there is no separate notion of "today" to get out of sync.
+
+One bot's failure is caught, logged with its traceback, and does not stop the
+others — but the process still exits non-zero so the failure is not silent:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Nothing to do, or every bot ran fine |
+| `1` | One or more bots failed (see `data/advisor.log`) |
+| `2` | A configuration or data error before any bot ran |
+
+`scripts/install_task.ps1` registers a Windows Scheduled Task that runs this
+once a day. It is idempotent (re-running updates the existing task) and takes
+`-Remove` to unregister and `-WhatIf` to preview without changing anything. If
+a bot stops trading, check its account status in the ledger first — `run_daily`
+still marks a killed or paused bot to market every session, it just never
+submits new orders for it.
+
 ## My Investments (real positions)
 
 The My Investments tab records what you **actually** did: any Yahoo ticker, how

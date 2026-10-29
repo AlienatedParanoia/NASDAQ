@@ -266,6 +266,43 @@ class TestIdempotency:
         assert ledger.applied_action_ids(account.id, D1) == set()
 
 
+class TestTransaction:
+    """`with self._conn:` does not nest in sqlite3 — the inner block commits
+    everything early, so a crash after it would still leave the earlier
+    writes committed. `transaction()` must behave as one atomic unit however
+    many internal writer methods it wraps."""
+
+    def test_a_crash_inside_leaves_nothing_committed(self, ledger, account):
+        with pytest.raises(RuntimeError):
+            with ledger.transaction():
+                buy(ledger, account, 10, 100.0, session=D1)
+                raise RuntimeError("bot blew up mid-session")
+        assert ledger.rebuild_cash(account.id) == pytest.approx(10_000.0)
+        assert ledger.rebuild_positions(account.id) == {}
+
+    def test_a_crash_after_an_inner_write_method_still_rolls_back(self, ledger, account):
+        # record_order and record_fill each contain their own internal
+        # `with self._tx():` — this is the exact nesting the bug was about.
+        with pytest.raises(RuntimeError):
+            with ledger.transaction():
+                buy(ledger, account, 10, 100.0, session=D1)
+                ledger.set_last_processed_session(account.id, D1)
+                raise RuntimeError("second write already landed internally")
+        assert ledger.rebuild_cash(account.id) == pytest.approx(10_000.0)
+        assert ledger.last_processed_session(account.id) is None
+
+    def test_success_commits_everything_together(self, ledger, account):
+        with ledger.transaction():
+            buy(ledger, account, 10, 100.0, session=D1)
+            ledger.set_last_processed_session(account.id, D1)
+        assert ledger.rebuild_positions(account.id)["AAPL"].qty == 10
+        assert ledger.last_processed_session(account.id) == D1
+
+    def test_writes_without_an_explicit_transaction_still_commit(self, ledger, account):
+        buy(ledger, account, 10, 100.0, session=D1)
+        assert ledger.rebuild_positions(account.id)["AAPL"].qty == 10
+
+
 class TestPersistence:
     def test_state_survives_reopening_the_file(self, tmp_path):
         path = tmp_path / "ledger.db"

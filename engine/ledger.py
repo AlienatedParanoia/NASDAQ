@@ -21,6 +21,7 @@ damage of a schema change.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -208,6 +209,7 @@ class Ledger:
         self._conn.executescript(_SCHEMA)
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
+        self._tx_depth = 0
 
     def close(self) -> None:
         self._conn.close()
@@ -220,10 +222,46 @@ class Ledger:
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """For the caller that needs to wrap a whole session in one
-        transaction (phase 5's runner does, so a crash mid-session cannot
-        leave a half-processed account)."""
+        """Raw access for read-only queries outside this class. Writers
+        must go through `transaction()` / the internal `_tx()`, not this —
+        plain `with self._conn:` does not nest, so using it directly for
+        writes would commit early inside an outer `transaction()`."""
         return self._conn
+
+    @contextlib.contextmanager
+    def _tx(self):
+        """Reentrant transaction. The outermost call owns the commit/rollback;
+        nested calls (every internal write method uses this) join it instead
+        of each committing on its own — plain `sqlite3` `with conn:` blocks do
+        not nest, so without this a crash mid-session would leave the writes
+        before the crash committed and the ones after it missing."""
+        if self._tx_depth > 0:
+            self._tx_depth += 1
+            try:
+                yield self._conn
+            finally:
+                self._tx_depth -= 1
+            return
+        self._tx_depth = 1
+        try:
+            yield self._conn
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        finally:
+            self._tx_depth = 0
+
+    def transaction(self):
+        """Public entry point for a caller that needs several ledger writes
+        to land atomically (phase 5's runner wraps each bot's session in
+        one), e.g.::
+
+            with ledger.transaction():
+                ledger.record_fill(fill)
+                ledger.set_last_processed_session(account_id, session)
+        """
+        return self._tx()
 
     # ---------------------------------------------------------------- accounts
 
@@ -234,7 +272,7 @@ class Ledger:
             raise LedgerError(f"unknown account kind {kind!r}")
         if starting_cash < 0:
             raise LedgerError("starting cash cannot be negative")
-        with self._conn:
+        with self._tx():
             cur = self._conn.execute(
                 "INSERT INTO accounts (name, kind, starting_cash, status, created_at)"
                 " VALUES (?,?,?,?,?)",
@@ -289,7 +327,7 @@ class Ledger:
     def set_account_status(self, account_id: int, status: str) -> None:
         if status not in (ACTIVE, PAUSED, KILLED):
             raise LedgerError(f"unknown account status {status!r}")
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE accounts SET status=? WHERE id=?", (status, account_id)
             )
@@ -305,7 +343,7 @@ class Ledger:
 
     def record_order(self, order: Order) -> Order:
         """Persist a new order and its opening status event. Assigns the id."""
-        with self._conn:
+        with self._tx():
             cur = self._conn.execute(
                 "INSERT INTO orders (account_id, created_session, ticker, side, type,"
                 " qty, limit_price, stop_price, tif, reason, created_at)"
@@ -347,7 +385,7 @@ class Ledger:
     ) -> None:
         """Append a status change. Never updates the orders row — the history
         of an order is the sequence of its events."""
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO order_events (order_id, session, status, reject_reason, at)"
                 " VALUES (?,?,?,?,?)",
@@ -366,7 +404,7 @@ class Ledger:
         """A split re-terms a resting order. This is the one place an orders
         row is updated, and it is a restatement of the same economic order —
         the event log records that the split happened."""
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE orders SET qty=?, limit_price=?, stop_price=? WHERE id=?",
                 (float(qty), limit_price, stop_price, order_id),
@@ -437,7 +475,7 @@ class Ledger:
         The gross and the commission are separate cash events so a blotter can
         show what costs took out without re-deriving them.
         """
-        with self._conn:
+        with self._tx():
             cur = self._conn.execute(
                 "INSERT INTO fills (order_id, account_id, session, ticker, side, qty,"
                 " price, commission, slippage_cost) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -498,7 +536,7 @@ class Ledger:
         self, account_id: int, kind: str, amount: float, session=None,
         ref: int | None = None, note: str = "",
     ) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO cash_events (account_id, session, kind, amount, ref, note)"
                 " VALUES (?,?,?,?,?,?)",
@@ -522,7 +560,7 @@ class Ledger:
         self, account_id: int, session, ticker: str, type_: str, value: float,
         shares_before: float | None = None, shares_after: float | None = None,
     ) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO corporate_action_events (account_id, session, ticker,"
                 " type, value, shares_before, shares_after) VALUES (?,?,?,?,?,?,?)",
@@ -638,7 +676,7 @@ class Ledger:
         payload = json.dumps(
             {t: {"qty": p.qty, "avg_cost": p.avg_cost} for t, p in sorted(positions.items())}
         )
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO snapshots (account_id, session, cash, equity, positions_json)"
                 " VALUES (?,?,?,?,?)"
@@ -686,7 +724,7 @@ class Ledger:
         return pd.Timestamp(row["last_processed_session"])
 
     def set_last_processed_session(self, account_id: int, session) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO account_state (account_id, last_processed_session, status)"
                 " VALUES (?,?,?)"
