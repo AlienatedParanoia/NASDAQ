@@ -254,8 +254,19 @@ python -m bots.run_daily               # advance every enabled bot
 python -m bots.run_daily --dry-run     # compute everything, write nothing
 python -m bots.run_daily --bot NAME    # just one bot
 python -m bots.run_daily --no-fetch    # use the price cache as-is
-python -m bots.run_daily --until DATE  # pretend DATE is the latest session
+python -m bots.run_daily --until DATE  # stop at an earlier session DATE
 ```
+
+`--until` can only move the end point *back*: a date after the latest complete
+session (whose bar may still be forming) or a date the market was closed is
+refused with exit code 2, never snapped to a nearby session.
+
+A session is only processed once its prices are in: if fewer than 95% of a
+bot's tickers (`MIN_SESSION_COVERAGE`, counting only tickers already listed by
+then) have a bar for it — a stale cache, a failed or late Yahoo refresh — the
+bot stops *before* that session, its cursor untouched, and picks it up on the
+next run. One halted stock in a big universe does not hold anything up; a bot
+trading a single ticker waits for that ticker.
 
 Each bot's each session runs inside one ledger transaction
 (`Ledger.transaction()`): a crash rolls that session back in full — including
@@ -265,18 +276,22 @@ cursor (`last_processed_session`) is what decides what is left to do, so
 re-running the same day is a no-op and a missed day is simply more sessions to
 walk next time — there is no separate notion of "today" to get out of sync.
 
-One bot's failure is caught, logged with its traceback, and does not stop the
-others — but the process still exits non-zero so the failure is not silent:
+One bot's failure — in setup or mid-session — is caught, logged with its
+traceback, and does not stop the others — but the process still exits non-zero so the failure is not silent:
 
 | Exit code | Meaning |
 |---|---|
 | `0` | Nothing to do, or every bot ran fine |
 | `1` | One or more bots failed (see `data/advisor.log`) |
-| `2` | A configuration or data error before any bot ran |
+| `2` | A configuration, argument or data error before any bot ran |
+| `3` | No failures, but a bot is waiting for a session's price data (retries next run) |
 
 `scripts/install_task.ps1` registers a Windows Scheduled Task that runs this
-once a day. It is idempotent (re-running updates the existing task) and takes
-`-Remove` to unregister and `-WhatIf` to preview without changing anything. If
+once a day, whether or not you are logged in (S4U logon: no stored password),
+so it must be run once from an **Administrator** PowerShell. It is idempotent
+(re-running replaces the existing task, principal and description included)
+and takes `-Remove` to unregister and `-WhatIf` to preview without changing
+anything. If
 a bot stops trading, check its account status in the ledger first — `run_daily`
 still marks a killed or paused bot to market every session, it just never
 submits new orders for it.

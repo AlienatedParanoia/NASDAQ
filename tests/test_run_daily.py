@@ -249,18 +249,142 @@ class TestPauseAndKill:
         assert ledger.snapshots(bot.account_id)
 
 
+def many(n: int, missing_on: pd.Timestamp | None = None, n_missing: int = 0):
+    """n tickers T00..T{n-1}; the first n_missing have no bar on missing_on."""
+    frames = {}
+    for i in range(n):
+        frame = ramp(10, start=100.0 + i)
+        if i < n_missing:
+            frame = frame.drop(missing_on)
+        frames[f"T{i:02d}"] = frame
+    return frames
+
+
 class TestMissingBar:
-    def test_a_ticker_missing_its_bar_on_a_session_is_never_matched(self, ledger):
-        """AAA has no row for SESSIONS[2] — a gap, not a corrupt file. The
-        order must stay pending rather than fill against nothing."""
-        full = ramp(10)
-        gapped = full.drop(SESSIONS[2])
+    def test_a_lone_ticker_missing_its_bar_stalls_instead_of_advancing(self, ledger):
+        """AAA has no row for SESSIONS[2]: 0 of 1 tickers is far below the
+        coverage threshold, so the session is left for the next run rather
+        than marked done on yesterday's price."""
+        gapped = ramp(10).drop(SESSIONS[2])
         fetcher = FakeFetcher({"AAA": gapped})
         spec = FakeSpec("gapped", BuyOnce)
 
         outcome = run_bot(spec, ledger, fetcher, SESSIONS[2], costs=ZERO_COSTS)
         assert not outcome.failed
+        assert outcome.stalled and outcome.results == []
+        account_id = ledger.account_by_name("gapped").id
+        assert ledger.last_processed_session(account_id) is None
+        assert ledger.snapshots(account_id) == []
+
+    def test_a_stale_refresh_stalls_then_resumes_once_the_bars_arrive(self, ledger):
+        universe = tuple(f"T{i:02d}" for i in range(20))
+        spec = FakeSpec("stale", BuyOnce, universe=universe)
+        run_bot(spec, ledger, FakeFetcher(many(20)), SESSIONS[1], costs=ZERO_COSTS)
+        account_id = ledger.account_by_name("stale").id
+
+        # half the universe has not got SESSIONS[2] yet
+        stale = FakeFetcher(many(20, missing_on=SESSIONS[2], n_missing=10))
+        outcome = run_bot(spec, ledger, stale, SESSIONS[3], costs=ZERO_COSTS)
+        assert not outcome.failed
+        assert "10/20" in outcome.stalled
+        assert outcome.results == [], "SESSIONS[3] must not run past the gap"
+        assert ledger.last_processed_session(account_id) == SESSIONS[1]
+
+        outcome = run_bot(spec, ledger, FakeFetcher(many(20)), SESSIONS[3],
+                          costs=ZERO_COSTS)
+        assert not outcome.stalled
+        assert [r.session for r in outcome.results] == [SESSIONS[2], SESSIONS[3]]
+
+    def test_one_halted_ticker_in_a_large_universe_is_tolerated_and_never_matched(
+        self, ledger
+    ):
+        """19 of 20 is exactly the 95% threshold: the session runs, and the
+        ticker without a bar never fills against nothing."""
+        universe = tuple(f"T{i:02d}" for i in range(20))
+        spec = FakeSpec("halt", BuyOnce, universe=universe)
+        # BuyOnce trades T00, which is the ticker with the gap
+        spec.strategy_factory = lambda: BuyOnce("T00")
+        frames = many(20, missing_on=SESSIONS[3], n_missing=1)
+
+        run_bot(spec, ledger, FakeFetcher(frames), SESSIONS[2], costs=ZERO_COSTS)
+        outcome = run_bot(spec, ledger, FakeFetcher(frames), SESSIONS[3],
+                          costs=ZERO_COSTS)
+        assert not outcome.stalled and not outcome.failed
+        assert [r.session for r in outcome.results] == [SESSIONS[3]]
         assert outcome.results[0].broker.fills == ()
+
+
+class TestSetupFailure:
+    def test_a_bot_failing_in_setup_does_not_stop_the_others(self, ledger):
+        class BrokenUniverse(FakeSpec):
+            def resolve_universe(self):
+                raise RuntimeError("universe file unreadable")
+
+        fetcher = FakeFetcher({"AAA": ramp(10)})
+        outcomes = process_all(
+            [FakeSpec("a", BuyOnce), BrokenUniverse("broken", BuyOnce),
+             FakeSpec("b", BuyOnce)],
+            ledger, fetcher, SESSIONS[2], costs=ZERO_COSTS,
+        )
+        by_name = {o.spec_name: o for o in outcomes}
+        assert by_name["broken"].failed
+        assert by_name["broken"].error.startswith("setup:")
+        assert by_name["a"].results and by_name["b"].results
+
+
+class TestMainCli:
+    """`main` end to end with the network, the real data dir and bots.yaml
+    swapped out."""
+
+    @pytest.fixture
+    def cli(self, tmp_path, monkeypatch):
+        import bots.run_daily as rd
+
+        frames = {"AAA": ramp(10)}
+        specs = [FakeSpec("on", BuyOnce), FakeSpec("off", BuyOnce, enabled=False)]
+
+        class Fetcher(FakeFetcher):
+            def __init__(self, _path):
+                super().__init__(frames)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(rd.paths, "setup_logging", lambda: None)
+        monkeypatch.setattr(rd.paths, "ledger_path", lambda: tmp_path / "l.db")
+        monkeypatch.setattr(rd.paths, "db_path", lambda: tmp_path / "c.db")
+        monkeypatch.setattr(rd, "configure_yfinance", lambda _d: None)
+        monkeypatch.setattr(rd, "load_specs", lambda: specs)
+        monkeypatch.setattr(rd, "DataFetcher", Fetcher)
+        monkeypatch.setattr(
+            rd.calendar, "latest_complete_session", lambda now=None: SESSIONS[4]
+        )
+        return rd, frames
+
+    def test_a_normal_run_exits_zero(self, cli):
+        rd, _ = cli
+        assert rd.main(["--no-fetch"]) == rd.EXIT_OK
+
+    def test_until_after_the_latest_complete_session_is_refused(self, cli):
+        rd, _ = cli
+        assert rd.main(["--no-fetch", "--until", str(SESSIONS[5].date())]) == 2
+
+    def test_until_on_a_weekend_is_refused(self, cli):
+        rd, _ = cli
+        assert rd.main(["--no-fetch", "--until", "2026-01-10"]) == 2
+
+    def test_until_that_is_not_a_date_is_refused(self, cli):
+        rd, _ = cli
+        assert rd.main(["--no-fetch", "--until", "next tuesday"]) == 2
+
+    def test_naming_a_disabled_bot_is_an_error(self, cli):
+        rd, _ = cli
+        assert rd.main(["--no-fetch", "--bot", "off"]) == 2
+
+    def test_a_bot_waiting_for_data_exits_three(self, cli):
+        rd, frames = cli
+        frames["AAA"] = frames["AAA"].drop(SESSIONS[4])
+        assert rd.main(["--no-fetch"]) == rd.EXIT_WAITING
 
 
 class TestNoQtImport:

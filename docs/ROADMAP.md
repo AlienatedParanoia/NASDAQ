@@ -12,7 +12,7 @@
 | 2 | Universe = S&P 500 ∪ NASDAQ-100 from CSVs in `data/constituents/` | Done — `69e30c4` |
 | 3 | Simulated broker behind an abstract `Broker`, append-only SQLite ledger | Done — `545a035` |
 | 4 | Bot framework: DataView look-ahead barrier, sizing, risk/kill switch, trend + mean-reversion strategies, `bots.yaml` registry, replay | Done — `3b219b4` |
-| 5 | Headless daily runner (`python -m bots.run_daily`) + Windows scheduled task at 06:30 SGT | **Planned & approved** — `docs/plans/phase5-forward-runner.md` |
+| 5 | Headless daily runner (`python -m bots.run_daily`) + Windows scheduled task at 06:30 SGT | Done — `1ab0407`, plus review fixes (see `docs/STATUS.md`) |
 | 6 | Brokerage UI for the bots — includes writing pause/kill status to the ledger, which Phase 5 reads | Reconstructed — confirm scope |
 | later | ML evaluation that reads its truth from the ledger (mentioned in the Phase 3 commit) | Reconstructed — confirm scope |
 

@@ -1,25 +1,29 @@
-# Status — 2026-10-29
+# Status — 2026-10-30
 
 ## Where things stand
 
-- Phases 0–4 are committed and pushed (see `docs/ROADMAP.md`).
-- Offline suite: **286 passed, 8 skipped** (`pytest tests -q`); the 8 skips are the
+- Phases 0–5 are committed (see `docs/ROADMAP.md`). Phase 5 (`1ab0407`) is
+  pushed; the review-fix commit that follows it is not, until the owner says so.
+- Offline suite: **311 passed, 8 skipped** (`pytest tests -q`); the 8 skips are the
   `--network` checks.
-- Phase 4 is complete: `--selftest` includes broker and replay steps,
-  `nasdaq-advisor.spec` bundles `bots.yaml`, and the README has a Bots section.
+- Phase 5 review fixes (owner decisions: 95% coverage, task runs logged out):
+  - `bots/run_daily.py` stops a bot *before* a session where under 95% of its
+    tickers have a bar (stale cache / failed refresh) instead of marking the day
+    done on old prices; exit code `3` = waiting for data.
+  - A bot's setup failure (universe, build, data load) is isolated like a
+    mid-session one; anything escaping still reaches `advisor.log`.
+  - `--until` must be a trading day no later than the latest complete session.
+  - `--bot NAME` for a disabled bot is an error (exit 2), not a silent no-op.
+  - `scripts/install_task.ps1`: S4U logon (runs logged out; needs an admin
+    prompt once), `-Force` re-registration so principal/description update, and
+    pure ASCII — the committed version did not parse in Windows PowerShell 5.1.
+- **The scheduled task is not registered yet.** The owner runs
+  `scripts\install_task.ps1` from an Administrator PowerShell.
 
-## Next step: Phase 5
+## Next step: Phase 6
 
-Implement `docs/plans/phase5-forward-runner.md` as written. The plan is approved,
-including two owner decisions: a single 06:30 SGT daily run, and a failing bot is
-isolated (rolled back, logged, retried next day) rather than fatal.
-
-Start with the `Ledger.transaction()` fix — `engine/ledger.py` still has 10 plain
-`with self._conn:` blocks, which do not nest in `sqlite3`, so nothing can be made
-atomic per session until that lands. Nothing from Phase 5 has been written yet.
-
-After Phase 5: commit (`phase5: headless daily runner and scheduled task`), do not
-push, and stop for the owner's approval of Phase 6.
+Stop for the owner's approval. Phase 6's scope is reconstructed (see the caveat
+in `docs/ROADMAP.md`) and must be confirmed before a plan is written.
 
 ## Findings worth knowing
 
