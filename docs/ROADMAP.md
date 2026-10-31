@@ -13,7 +13,7 @@
 | 3 | Simulated broker behind an abstract `Broker`, append-only SQLite ledger | Done — `545a035` |
 | 4 | Bot framework: DataView look-ahead barrier, sizing, risk/kill switch, trend + mean-reversion strategies, `bots.yaml` registry, replay | Done — `3b219b4` |
 | 5 | Headless daily runner (`python -m bots.run_daily`) + Windows scheduled task at 06:30 SGT | Done — `1ab0407`, plus review fixes (see `docs/STATUS.md`) |
-| 6 | Brokerage UI for the bots — includes writing pause/kill status to the ledger, which Phase 5 reads | Reconstructed — confirm scope |
+| 6 | Bots tab: overview, per-bot detail, pause/resume/kill/reset, append-only status history, QQQ benchmark (`docs/plans/phase6-bots-tab.md`) | Done — `phase6` commit (see `docs/STATUS.md`) |
 | later | ML evaluation that reads its truth from the ledger (mentioned in the Phase 3 commit) | Reconstructed — confirm scope |
 
 Known spec rules: **rule 5** — a decision on bar *t* executes on *t+1* or later.

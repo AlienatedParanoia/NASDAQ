@@ -47,6 +47,7 @@ from bots.bot import BotSessionResult
 from bots.data_view import DataView
 from bots.registry import BotSpec, ConfigError, load_specs
 from bots.replay import load_market_data
+from bots.report import BENCHMARK
 from data import calendar
 from data.fetcher import DataFetcher, configure_yfinance, tickers_to_fetch
 from engine.costs import DEFAULT_COSTS, CostModel
@@ -301,7 +302,9 @@ def main(argv: list[str] | None = None) -> int:
 
         fetcher = DataFetcher(paths.db_path())
         if not args.no_fetch:
-            errors = fetcher.refresh(tickers_to_fetch())
+            # the benchmark is not an index member; fetch it so the Bots
+            # tab's comparison stays current
+            errors = fetcher.refresh([*tickers_to_fetch(), BENCHMARK])
             if errors:
                 log.warning("refresh had %d error(s): %s", len(errors), errors)
     except ConfigError as e:

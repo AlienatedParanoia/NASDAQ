@@ -1,29 +1,37 @@
-# Status — 2026-10-30
+# Status — 2026-10-31
 
 ## Where things stand
 
-- Phases 0–5 are committed (see `docs/ROADMAP.md`). Phase 5 (`1ab0407`) is
-  pushed; the review-fix commit that follows it is not, until the owner says so.
-- Offline suite: **311 passed, 8 skipped** (`pytest tests -q`); the 8 skips are the
+- Phases 0–6 are committed (see `docs/ROADMAP.md`). Phase 5 (`1ab0407`) is
+  pushed; its review-fix commit (`fad8921`) and Phase 6 are not, until the owner
+  says so.
+- Offline suite: **339 passed, 8 skipped** (`pytest tests -q`); the 8 skips are the
   `--network` checks.
-- Phase 5 review fixes (owner decisions: 95% coverage, task runs logged out):
-  - `bots/run_daily.py` stops a bot *before* a session where under 95% of its
-    tickers have a bar (stale cache / failed refresh) instead of marking the day
-    done on old prices; exit code `3` = waiting for data.
-  - A bot's setup failure (universe, build, data load) is isolated like a
-    mid-session one; anything escaping still reaches `advisor.log`.
-  - `--until` must be a trading day no later than the latest complete session.
-  - `--bot NAME` for a disabled bot is an error (exit 2), not a silent no-op.
-  - `scripts/install_task.ps1`: S4U logon (runs logged out; needs an admin
-    prompt once), `-Force` re-registration so principal/description update, and
-    pure ASCII — the committed version did not parse in Windows PowerShell 5.1.
+- Phase 6 (plan: `docs/plans/phase6-bots-tab.md`) added the **Bots** tab, the
+  `bots/admin.py` controls (also a CLI) and `bots/report.py`. Owner decisions:
+  kill is final and Reset opens `<bot>#N`; QQQ buy-and-hold is the benchmark;
+  no "Run now" button; a manual kill follows `liquidate_on_kill`; pause leaves
+  resting orders to fill.
+- Ledger schema is now **v2**: `account_status_events` (append-only; fixes the
+  old in-place `UPDATE` of account status, which broke the append-only rule)
+  and `bot_accounts` (bot to account, for reset). Opening a v1 ledger migrates it
+  in place. The real `data/ledger.db` was migrated on 2026-10-31 by a read-only
+  `python -m bots.admin status`; both bots came through active, with their
+  accounts mapped.
+- Found and fixed along the way: a status-only kill would not have stopped
+  orders already placed, because the broker fills them before the bot checks
+  its status. Kill now cancels them in the same transaction.
+- QQQ is not cached until the next daily run fetches it, so the "vs QQQ" column
+  shows "—" until then.
 - **The scheduled task is not registered yet.** The owner runs
   `scripts\install_task.ps1` from an Administrator PowerShell.
 
-## Next step: Phase 6
+## Next step
 
-Stop for the owner's approval. Phase 6's scope is reconstructed (see the caveat
-in `docs/ROADMAP.md`) and must be confirmed before a plan is written.
+Stop for the owner's approval. The phase after this ("ML evaluation that reads
+its truth from the ledger") is reconstructed and must be scoped with the owner
+before a plan is written. The My Investments backlog below is the other
+candidate.
 
 ## Findings worth knowing
 

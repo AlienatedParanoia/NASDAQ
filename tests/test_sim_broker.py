@@ -623,7 +623,7 @@ class TestCancel:
             broker.cancel(order.id)
 
     def test_a_killed_account_cannot_place_orders(self, broker, ledger):
-        ledger.set_account_status(broker.account_id, "killed")
+        ledger.set_account_status(broker.account_id, "killed", source="manual")
         order = submit(broker, Side.BUY, 1)
         assert order.status is OrderStatus.REJECTED
         assert "killed" in order.reject_reason

@@ -13,7 +13,8 @@ Cash is the same — summed from cash_events, never kept as a running total.
 **2. Status changes are appended, not overwritten.** An order's current status
 is the newest row in `order_events`, not a mutable column on `orders`. So "why
 didn't my bot buy?" is answerable months later: the rejection is still there,
-with its reason.
+with its reason. Accounts work the same way (`account_status_events`), so a
+pause or kill keeps who did it, when and why.
 
 The ledger lives in its own file, never inside cache.db — that one is wiped on
 CACHE_VERSION bumps, and a record of what the bots did must not be collateral
@@ -44,7 +45,7 @@ from engine.orders import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # account kinds — a replay must never be mistaken for live paper performance
 FORWARD = "forward"
@@ -62,6 +63,14 @@ SELL = "sell"
 ACTIVE = "active"
 PAUSED = "paused"
 KILLED = "killed"
+STATUSES = (ACTIVE, PAUSED, KILLED)
+
+# account_status_events.source: who changed the status
+SOURCE_RISK = "risk"            # the risk manager's drawdown kill
+SOURCE_UI = "ui"                # the Bots tab
+SOURCE_CLI = "cli"              # python -m bots.admin
+SOURCE_MANUAL = "manual"        # Bot.pause()/resume()/kill() called from code
+SOURCE_MIGRATION = "migration"  # seeded from the v1 status column
 
 # corporate_action_events.type
 SPLIT = "split"
@@ -71,6 +80,9 @@ SPLIT = "split"
 EPS = 1e-6
 
 _SCHEMA = """
+-- `status` here and on account_state is the v1 mutable column: written once at
+-- creation, never read or updated since v2. SQLite cannot cleanly drop a
+-- column, so it stays; account_status_events is the truth.
 CREATE TABLE IF NOT EXISTS accounts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL UNIQUE,
@@ -79,6 +91,28 @@ CREATE TABLE IF NOT EXISTS accounts (
     status        TEXT NOT NULL DEFAULT 'active',
     created_at    TEXT NOT NULL
 );
+
+-- append-only: an account's status is the LATEST row here
+CREATE TABLE IF NOT EXISTS account_status_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    status     TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    reason     TEXT,
+    session    TEXT,
+    at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_status_events_account ON account_status_events(account_id);
+
+-- which account a bot trades through; its newest row is the current one. A
+-- reset appends a fresh account instead of wiping the old one's history.
+CREATE TABLE IF NOT EXISTS bot_accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_name   TEXT NOT NULL,
+    account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
+    started_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bot_accounts_bot ON bot_accounts(bot_name);
 
 CREATE TABLE IF NOT EXISTS orders (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,6 +225,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# an account's status is its newest status event, never a column
+_ACCOUNT_SELECT = (
+    "SELECT a.id, a.name, a.kind, a.starting_cash,"
+    " COALESCE((SELECT e.status FROM account_status_events e"
+    "  WHERE e.account_id = a.id ORDER BY e.id DESC LIMIT 1), 'active') AS status"
+    " FROM accounts a"
+)
+
+
+def _account(row: sqlite3.Row) -> Account:
+    return Account(row["id"], row["name"], row["kind"], row["starting_cash"],
+                   row["status"])
+
+
 class Ledger:
     """Append-only store of everything the bots did.
 
@@ -206,10 +254,31 @@ class Ledger:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         self._conn.executescript(_SCHEMA)
+        if version < 2:
+            self._migrate_to_v2()
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
         self._tx_depth = 0
+
+    def _migrate_to_v2(self) -> None:
+        """v1 kept status in a mutable column and found a bot's account by
+        name. Seed one status event per account from that column, and map
+        each account to the bot of the same name. No-ops on a fresh file."""
+        self._conn.execute(
+            "INSERT INTO account_status_events"
+            " (account_id, status, source, reason, session, at)"
+            " SELECT id, status, ?, 'seeded from the v1 status column', NULL, ?"
+            " FROM accounts WHERE id NOT IN"
+            " (SELECT account_id FROM account_status_events)",
+            (SOURCE_MIGRATION, _now()),
+        )
+        self._conn.execute(
+            "INSERT INTO bot_accounts (bot_name, account_id, started_at)"
+            " SELECT name, id, created_at FROM accounts WHERE id NOT IN"
+            " (SELECT account_id FROM bot_accounts)"
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -266,8 +335,11 @@ class Ledger:
     # ---------------------------------------------------------------- accounts
 
     def create_account(
-        self, name: str, starting_cash: float, kind: str = FORWARD
+        self, name: str, starting_cash: float, kind: str = FORWARD,
+        bot_name: str | None = None,
     ) -> Account:
+        """Open an account and make it `bot_name`'s current one (default: the
+        bot of the same name)."""
         if kind not in (FORWARD, BACKTEST):
             raise LedgerError(f"unknown account kind {kind!r}")
         if starting_cash < 0:
@@ -284,6 +356,17 @@ class Ledger:
                 " VALUES (?,NULL,?)",
                 (account_id, ACTIVE),
             )
+            self._conn.execute(
+                "INSERT INTO account_status_events"
+                " (account_id, status, source, reason, session, at)"
+                " VALUES (?,?,?,?,NULL,?)",
+                (account_id, ACTIVE, SOURCE_MANUAL, "account opened", _now()),
+            )
+            self._conn.execute(
+                "INSERT INTO bot_accounts (bot_name, account_id, started_at)"
+                " VALUES (?,?,?)",
+                (bot_name or name, account_id, _now()),
+            )
             # starting cash is itself a cash event, so rebuild_cash needs no
             # special case for "where did the first dollar come from"
             self._conn.execute(
@@ -294,50 +377,81 @@ class Ledger:
         return Account(account_id, name, kind, float(starting_cash), ACTIVE)
 
     def get_account(self, account_id: int) -> Account:
-        row = self._conn.execute(
-            "SELECT id, name, kind, starting_cash, status FROM accounts WHERE id=?",
-            (account_id,),
-        ).fetchone()
+        row = self._conn.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (account_id,)).fetchone()
         if row is None:
             raise LedgerError(f"no such account: {account_id}")
-        return Account(row["id"], row["name"], row["kind"], row["starting_cash"],
-                       row["status"])
+        return _account(row)
 
     def account_by_name(self, name: str) -> Account | None:
-        row = self._conn.execute(
-            "SELECT id, name, kind, starting_cash, status FROM accounts WHERE name=?",
-            (name,),
-        ).fetchone()
-        if row is None:
-            return None
-        return Account(row["id"], row["name"], row["kind"], row["starting_cash"],
-                       row["status"])
+        row = self._conn.execute(_ACCOUNT_SELECT + " WHERE a.name=?", (name,)).fetchone()
+        return None if row is None else _account(row)
 
     def accounts(self, kind: str | None = None) -> list[Account]:
-        sql = "SELECT id, name, kind, starting_cash, status FROM accounts"
+        sql = _ACCOUNT_SELECT
         params: tuple = ()
         if kind is not None:
-            sql += " WHERE kind=?"
+            sql += " WHERE a.kind=?"
             params = (kind,)
-        return [
-            Account(r["id"], r["name"], r["kind"], r["starting_cash"], r["status"])
-            for r in self._conn.execute(sql + " ORDER BY id", params)
-        ]
+        return [_account(r) for r in self._conn.execute(sql + " ORDER BY a.id", params)]
 
-    def set_account_status(self, account_id: int, status: str) -> None:
-        if status not in (ACTIVE, PAUSED, KILLED):
+    def set_account_status(
+        self, account_id: int, status: str, *, source: str,
+        reason: str | None = None, session=None,
+    ) -> None:
+        """Append a status change. Killed is final: a killed account is never
+        revived; a reset opens a new one instead (see `bot_accounts`)."""
+        if status not in STATUSES:
             raise LedgerError(f"unknown account status {status!r}")
         with self._tx():
+            current = self.get_account(account_id).status
+            if current == KILLED:
+                raise LedgerError(
+                    f"account {account_id} is killed; a killed account cannot "
+                    f"become {status!r}"
+                )
             self._conn.execute(
-                "UPDATE accounts SET status=? WHERE id=?", (status, account_id)
-            )
-            self._conn.execute(
-                "UPDATE account_state SET status=? WHERE account_id=?",
-                (status, account_id),
+                "INSERT INTO account_status_events"
+                " (account_id, status, source, reason, session, at)"
+                " VALUES (?,?,?,?,?,?)",
+                (
+                    account_id, status, source, reason,
+                    _iso(session) if session is not None else None, _now(),
+                ),
             )
 
     def account_status(self, account_id: int) -> str:
         return self.get_account(account_id).status
+
+    def status_history(self, account_id: int) -> list[dict]:
+        return [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT status, source, reason, session, at FROM account_status_events"
+                " WHERE account_id=? ORDER BY id",
+                (account_id,),
+            )
+        ]
+
+    # ------------------------------------------------------------ bot accounts
+
+    def bot_account(self, bot_name: str) -> Account | None:
+        """The account `bot_name` currently trades through, or None."""
+        row = self._conn.execute(
+            "SELECT account_id FROM bot_accounts WHERE bot_name=?"
+            " ORDER BY id DESC LIMIT 1",
+            (bot_name,),
+        ).fetchone()
+        return None if row is None else self.get_account(row["account_id"])
+
+    def bot_account_history(self, bot_name: str) -> list[Account]:
+        """Every account `bot_name` has traded through, oldest first."""
+        return [
+            self.get_account(r["account_id"])
+            for r in self._conn.execute(
+                "SELECT account_id FROM bot_accounts WHERE bot_name=? ORDER BY id",
+                (bot_name,),
+            )
+        ]
 
     # ------------------------------------------------------------------ orders
 

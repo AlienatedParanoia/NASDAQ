@@ -9,9 +9,10 @@ converted from a signal/recommendation tool into an environment where several
 trading bots trade **fake money** against real end-of-day market data through a
 simulated broker. There is no real-money trading code and none is planned.
 
-The app currently has two tabs: **Watchlist** (S&P 500 / NASDAQ-100) and **My
+The app has three tabs: **Watchlist** (S&P 500 / NASDAQ-100), **My
 Investments** (the owner's real-money lot tracker with a cash ledger — treat its
-data as personal; see "Never commit" below).
+data as personal; see "Never commit" below) and **Bots** (the fake-money bots,
+read-only apart from pause / resume / kill / reset via `bots/admin.py`).
 
 ## Read these first
 
@@ -56,8 +57,8 @@ root; `README.md` → Tests lists them.
   rows; `adjusted_closes()` derives the adjusted series for indicators. A stored
   bar is final.
 - **The ledger is the source of truth.** Positions are never stored — they are
-  derived from fills + corporate actions. Status changes are appended, never
-  overwritten.
+  derived from fills + corporate actions. Status changes (orders and accounts)
+  are appended, never overwritten. A kill is final; a reset opens a new account.
 - **Ambiguities touching fill prices, cash or share counts are never guessed** —
   ask the owner.
 - `engine/costs.py` figures are placeholders and labelled as such; keep it that way

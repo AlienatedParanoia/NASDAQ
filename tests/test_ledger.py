@@ -88,14 +88,14 @@ class TestAccounts:
             ledger.create_account("broke", -5.0)
 
     def test_status_can_be_paused_and_killed(self, ledger, account):
-        ledger.set_account_status(account.id, "paused")
+        ledger.set_account_status(account.id, "paused", source="manual")
         assert ledger.account_status(account.id) == "paused"
-        ledger.set_account_status(account.id, "killed")
+        ledger.set_account_status(account.id, "killed", source="manual")
         assert ledger.account_status(account.id) == "killed"
 
     def test_an_unknown_status_is_refused(self, ledger, account):
         with pytest.raises(LedgerError):
-            ledger.set_account_status(account.id, "sleepy")
+            ledger.set_account_status(account.id, "sleepy", source="manual")
 
 
 class TestAppendOnlyOrders:

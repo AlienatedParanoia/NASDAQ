@@ -33,7 +33,7 @@ from bots.risk import RiskLimits, RiskManager
 from bots.sizing import EqualWeight, SizingPolicy
 from bots.strategy import OrderRequest, Strategy
 from engine.costs import DEFAULT_COSTS, CostModel
-from engine.ledger import ACTIVE, KILLED, PAUSED, Ledger
+from engine.ledger import ACTIVE, KILLED, PAUSED, SOURCE_MANUAL, SOURCE_RISK, Ledger
 from engine.orders import Order, OrderStatus, Side
 from engine.sim_broker import SessionResult, SimBroker
 
@@ -98,8 +98,9 @@ class Bot:
         kind: str = "forward",
         enabled: bool = True,
     ) -> "Bot":
-        """Open a fresh account for this bot, or reuse the existing one."""
-        account = ledger.account_by_name(name)
+        """Bind to this bot's current account (see `Ledger.bot_account`), or
+        open its first one."""
+        account = ledger.bot_account(name)
         if account is None:
             account = ledger.create_account(name, starting_cash, kind=kind)
         return cls(
@@ -199,7 +200,7 @@ class Bot:
         decision.log(self.name)
 
         if decision.kill:
-            self._kill(session, decision.kill_reason, data, portfolio)
+            self._kill(session, decision.kill_reason, portfolio.positions, SOURCE_RISK)
             return BotSessionResult(
                 session=session, broker=broker_result, requested=len(requests),
                 blocked=tuple((b.request.describe(), b.reason) for b in decision.blocked),
@@ -276,58 +277,74 @@ class Bot:
         return self.broker.submit(order)
 
     def _kill(
-        self, session: pd.Timestamp, reason: str, data: DataView, portfolio: PortfolioView
+        self, session: pd.Timestamp | None, reason: str,
+        positions: dict[str, float], source: str,
     ) -> None:
         """Stop the bot. Cancels resting orders; liquidates only if configured.
 
-        Holding by default is deliberate — see bots/risk.py.
+        Holding by default is deliberate; see bots/risk.py.
 
         Order of operations matters and is easy to get wrong: resting orders are
         cancelled FIRST (a resting sell reserves its shares, which would make
         the liquidation look like an oversell), the liquidation is submitted
-        SECOND, and the account is marked killed LAST — because the broker
+        SECOND, and the account is marked killed LAST, because the broker
         refuses orders from a killed account, so marking it first would silently
         reject the very orders this is trying to place.
+
+        `session` is the session the liquidation orders are created on, so the
+        broker fills them on the next one. None means the bot has never
+        processed a session, and so holds nothing to liquidate.
         """
-        for order in self.broker.open_orders():
-            self.broker.cancel(order.id)
+        with self.ledger.transaction():
+            for order in self.broker.open_orders():
+                self.broker.cancel(order.id)
 
-        if self.risk.liquidate_on_kill:
-            placed = 0
-            for ticker, qty in portfolio.positions.items():
-                if qty <= 0:
-                    continue
-                order = self._submit(
-                    session,
-                    OrderRequest(
-                        ticker=ticker, side=Side.SELL, qty=qty,
-                        reason=f"liquidate on kill: {reason}",
-                    ),
+            if self.risk.liquidate_on_kill and session is not None:
+                placed = 0
+                for ticker, qty in positions.items():
+                    if qty <= 0:
+                        continue
+                    order = self._submit(
+                        session,
+                        OrderRequest(
+                            ticker=ticker, side=Side.SELL, qty=qty,
+                            reason=f"liquidate on kill: {reason}",
+                        ),
+                    )
+                    if order is not None and order.status is OrderStatus.PENDING:
+                        placed += 1
+                log.warning(
+                    "%s killed (%s); liquidating %d position(s) on the next session",
+                    self.name, reason, placed,
                 )
-                if order is not None and order.status is OrderStatus.PENDING:
-                    placed += 1
-            log.warning(
-                "%s killed (%s); liquidating %d position(s) on the next session",
-                self.name, reason, placed,
-            )
-        else:
-            log.warning("%s killed (%s); positions held", self.name, reason)
+            else:
+                log.warning("%s killed (%s); positions held", self.name, reason)
 
-        self.ledger.set_account_status(self.account_id, KILLED)
+            self.ledger.set_account_status(
+                self.account_id, KILLED, source=source, reason=reason, session=session,
+            )
 
     # ----------------------------------------------------------------- admin
 
-    def pause(self) -> None:
-        self.ledger.set_account_status(self.account_id, PAUSED)
+    def pause(self, reason: str | None = None, source: str = SOURCE_MANUAL) -> None:
+        self.ledger.set_account_status(
+            self.account_id, PAUSED, source=source, reason=reason,
+        )
 
-    def resume(self) -> None:
-        self.ledger.set_account_status(self.account_id, ACTIVE)
+    def resume(self, reason: str | None = None, source: str = SOURCE_MANUAL) -> None:
+        self.ledger.set_account_status(
+            self.account_id, ACTIVE, source=source, reason=reason,
+        )
 
-    def kill(self, reason: str = "manual") -> None:
-        self.ledger.set_account_status(self.account_id, KILLED)
-        for order in self.broker.open_orders():
-            self.broker.cancel(order.id)
-        log.warning("%s killed manually: %s", self.name, reason)
+    def kill(self, reason: str = "manual", source: str = SOURCE_MANUAL) -> None:
+        """A kill from outside a session (the Bots tab, the CLI). Same rules
+        as the drawdown kill, including `liquidate_on_kill`: the sells are
+        created on the last processed session, so they fill on the next."""
+        positions = {t: p.qty for t, p in self.broker.positions().items()}
+        self._kill(
+            self.ledger.last_processed_session(self.account_id), reason,
+            positions, source,
+        )
 
     def describe(self) -> str:
         return (

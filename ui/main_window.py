@@ -44,6 +44,7 @@ from data.fetcher import DataFetcher, FetchError
 from data.universe import SURVIVORSHIP_NOTE, describe, get_universe
 from ui.common import GREEN, RED
 from ui.detail_panel import DetailPanel
+from ui.bots_panel import BotsPanel
 from ui.investments_panel import InvestmentsPanel
 
 log = logging.getLogger(__name__)
@@ -313,9 +314,11 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
 
         self._investments = InvestmentsPanel()
+        self._bots = BotsPanel()
         tabs = QTabWidget()
         tabs.addTab(splitter, "Watchlist")
         tabs.addTab(self._investments, "My Investments")
+        tabs.addTab(self._bots, "Bots")
         self.setCentralWidget(tabs)
 
         self._thread: QThread | None = None

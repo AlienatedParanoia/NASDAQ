@@ -1,11 +1,13 @@
 # nasdaq-advisor
 
-Desktop app (PyQt6 + pandas + yfinance + SQLite) with two tabs:
+Desktop app (PyQt6 + pandas + yfinance + SQLite) with three tabs:
 
 - **Watchlist** — the S&P 500 and/or NASDAQ-100 (selectable in the toolbar) with
   each stock's last close, day change and volume, off a daily SQLite cache, plus
   a price chart for the selected ticker.
 - **My Investments** — real-money lot tracking with a cash ledger.
+- **Bots** — every fake-money bot's equity, positions, orders and activity
+  against a QQQ buy-and-hold benchmark, with pause / resume / kill / reset.
 
 **Fake money and informational use only.** Price data is end-of-day Yahoo
 Finance, ~15 minutes delayed. See the survivorship-bias note under Universe:
@@ -292,9 +294,50 @@ so it must be run once from an **Administrator** PowerShell. It is idempotent
 (re-running replaces the existing task, principal and description included)
 and takes `-Remove` to unregister and `-WhatIf` to preview without changing
 anything. If
-a bot stops trading, check its account status in the ledger first — `run_daily`
-still marks a killed or paused bot to market every session, it just never
-submits new orders for it.
+a bot stops trading, check its status on the Bots tab (or `python -m bots.admin
+status`) first — `run_daily` still marks a killed or paused bot to market every
+session, it just never submits new orders for it.
+
+### The Bots tab and bot controls
+
+The Bots tab is a read-only view of `data/ledger.db` and the price cache: one
+row per bot in `bots.yaml` (equity, cash, return, return relative to QQQ
+buy-and-hold over the same sessions, max drawdown, positions, last session
+processed), and for the selected bot its equity curve against QQQ, positions
+marked at the last processed session's close, every order with its status
+trail, and an activity list (fills, dividends, splits, status changes). It
+never fetches prices and never places orders. "Last session" turns red when a
+bot is behind the latest complete session: the daily run has not reached it, or
+is waiting for data (see `advisor.log`).
+
+The four controls are the only writes, and they live in `bots/admin.py` so the
+tab and the command line share one set of rules:
+
+| Control | Allowed when | What it does |
+|---|---|---|
+| Pause | active | Stops new decisions from the next session. Orders already placed still fill. |
+| Resume | paused | Back to active. |
+| Kill | active or paused | **Final.** Needs a reason. Cancels every resting order in the same transaction, and sells everything on the next session if the bot's `liquidate_on_kill` is true (same rule as the drawdown kill). |
+| Reset | killed | Opens a fresh account `<bot>#2`, `#3`… at the `bots.yaml` starting cash. The old account and its history stay in the ledger. The new account starts at the next daily run, with no backfill. |
+
+```
+python -m bots.admin status
+python -m bots.admin pause NAME [--reason TEXT]
+python -m bots.admin resume NAME
+python -m bots.admin kill NAME --reason TEXT
+python -m bots.admin reset NAME
+```
+
+Every status change is appended to `account_status_events` with who made it
+(`risk`, `ui`, `cli`), why and when; an account's status is its newest event.
+`bot_accounts` maps each bot to the accounts it has traded through. Ledger
+schema v2 adds both; opening an older ledger migrates it in place (one seeded
+status event and one mapping row per existing account).
+
+The QQQ comparison uses dividend-adjusted closes, because the bots receive
+dividends as cash. It needs QQQ's close on both the bot's first and its last
+session in the price cache (the daily run fetches QQQ). If either is missing,
+the column shows "—" rather than an estimate.
 
 ## My Investments (real positions)
 
@@ -337,7 +380,8 @@ repo root with `python -m tests.<name>`): `phase1_data_check`,
 `phase2_indicator_check`, `phase2_universe_check`, `phase3_backtest_check`,
 `phase5_ui_smoke`, `phase7_investments_check`, `phase11_real_pnl_check`, and
 `regression_review_fixes`, `phase3_broker_walkthrough`, and
-`phase4_replay_walkthrough`.
+`phase4_replay_walkthrough`. The Bots tab is covered by `tests/test_bots_tab.py`,
+including an offscreen-Qt smoke test that drives its buttons.
 `phase2_universe_check` is the slow one — it cold-fetches the whole union, then
 proves a same-day re-read makes zero network calls.
 

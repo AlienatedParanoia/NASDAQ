@@ -48,6 +48,7 @@ def _selftest() -> int:
 
         _selftest_broker(log)
         _selftest_replay(log)
+        _selftest_bot_controls(log)
 
         fetcher = DataFetcher(paths.db_path())
         data = fetcher.get_stock("AAPL", force=True)
@@ -158,6 +159,38 @@ def _selftest_replay(log) -> None:
             bot.strategy.name, session.date(), result.requested, result.submitted,
             result.equity,
         )
+
+
+def _selftest_bot_controls(log) -> None:
+    """Pause, resume, kill and reset a configured bot on a throwaway ledger,
+    then build its Bots-tab summary: the v2 ledger schema, bots/admin.py and
+    bots/report.py all have to work inside the frozen build for the Bots tab
+    to. The panel module is imported too, so a missing pyqtgraph or Qt piece
+    fails here rather than when the tab is first opened."""
+    import tempfile
+    from pathlib import Path
+
+    from bots import admin, report
+    from bots.registry import load_specs
+    from data import calendar as market_calendar
+    from engine.ledger import ACTIVE, KILLED, SOURCE_CLI, Ledger
+
+    import ui.bots_panel  # noqa: F401
+
+    spec = load_specs()[0]
+    with Ledger(Path(tempfile.mkdtemp()) / "selftest_controls.db") as ledger:
+        spec.build(ledger, universe=())
+        admin.pause(ledger, spec, SOURCE_CLI, "selftest")
+        admin.resume(ledger, spec, SOURCE_CLI)
+        admin.kill(ledger, spec, SOURCE_CLI, "selftest")
+        assert ledger.bot_account(spec.name).status == KILLED
+        fresh = admin.reset(ledger, spec)
+        assert fresh.status == ACTIVE and ledger.bot_account(spec.name).id == fresh.id
+        summary = report.summarise(
+            ledger, spec, market_calendar.latest_complete_session()
+        )
+        assert summary.previous_accounts == 1, summary
+    log.info("selftest OK: bot controls and Bots-tab report on %s", spec.name)
 
 
 def main() -> None:
