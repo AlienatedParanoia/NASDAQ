@@ -20,6 +20,8 @@ read-only apart from pause / resume / kill / reset via `bots/admin.py`).
 2. `docs/ROADMAP.md` — the phase plan (reconstructed; see its caveat).
 3. `docs/plans/` — the detailed, approved plan for the next phase.
 4. `README.md` — how each finished layer works (data, broker, bots, tests, build).
+5. `docs/HANDOFF.md` — moving to a new machine: what git does not carry (the bot
+   ledger, personal data, the scheduled task) and older review findings.
 
 ## Setup (Windows)
 

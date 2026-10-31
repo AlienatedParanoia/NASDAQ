@@ -22,6 +22,9 @@ backtests on this universe read optimistic by construction.
 
 ## Run from source
 
+Setting up on a new machine, or moving the bots' ledger to one: see
+`docs/HANDOFF.md`.
+
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
