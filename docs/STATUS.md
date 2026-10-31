@@ -28,6 +28,14 @@
 
 ## Next step
 
+**Moving to a new device (2026-10-31).** The owner is continuing on another
+machine through GitHub. The bot ledger travelled as `transfer/ledger-export.db`;
+`docs/NEW_DEVICE.md` is the checklist for Claude Code on the new machine
+(set up, verify, import the ledger, catch up, register the task). The old
+machine no longer runs the bots.
+
+After that:
+
 Stop for the owner's approval. The phase after this ("ML evaluation that reads
 its truth from the ledger") is reconstructed and must be scoped with the owner
 before a plan is written. The My Investments backlog below is the other

@@ -49,6 +49,10 @@ The frozen exe keeps its data in `%LOCALAPPDATA%\nasdaq-advisor\` instead of
 
 ## 3. Moving the bot ledger (only if you want continuity)
 
+> The 2026-10-31 move used GitHub instead: the export is committed as
+> `transfer/ledger-export.db`, and `docs/NEW_DEVICE.md` covers importing it.
+> The steps below are the private route, for any later move.
+
 **Only one machine may run the bots.** Two machines each running
 `bots.run_daily` against their own copy of `ledger.db` produce two diverging
 histories that cannot be merged. Pick one, and remove the scheduled task from

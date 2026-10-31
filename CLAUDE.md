@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+> **New device: move in progress.** If `transfer/ledger-export.db` exists, this
+> machine has not finished taking over from the old one. Before anything else,
+> follow `docs/NEW_DEVICE.md` step by step with the owner. Remove this block
+> when its step 6 is done.
+
 Guidance for Claude Code (or anyone) picking this project up on a fresh machine.
 
 ## What this is
@@ -76,6 +81,10 @@ root; `README.md` → Tests lists them.
   (see `git log` for the house style).
 
 ## Never commit
+
+(One-off exception, owner's decision 2026-10-31: `transfer/ledger-export.db`,
+the fake-money bot ledger, was committed to move it to a new machine. It is
+removed again in `docs/NEW_DEVICE.md` step 3. Never commit `investments.json`.)
 
 Personal financial data and runtime state: `data/investments.json*`,
 `data/paper_trading.json*`, `data/*.bak`, `data/*.db*`, logs. `.gitignore` covers
